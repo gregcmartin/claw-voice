@@ -35,8 +35,9 @@ export function classifyIntent(signals) {
   
   // ── Intent Detection ────────────────────────────────────────────────
   
-  // CHAT - Greetings, small talk, short responses
-  if (lower.match(/^(hello|hey|hi|good morning|good evening|yo|sup|what's up|how are you|thanks|thank you|cheers|appreciated|nice|cool|great|awesome|ok|okay|sure|alright)/)) {
+  // CHAT - Greetings, small talk, short responses (only if brief/standalone)
+  if (lower.match(/^(hello|hey|hi|good morning|good evening|yo|sup|what's up|how are you|thanks|thank you|cheers|appreciated|nice|cool|great|awesome)(\s|$)/) ||
+      (lower.match(/^(ok|okay|sure|alright)(\s|$)/) && wordCount <= 3)) {
     return buildBudget('CHAT', {
       maxSentences: 2,
       maxSpokenSeconds: 5,
