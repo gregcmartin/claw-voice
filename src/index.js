@@ -27,7 +27,8 @@ import { synthesizeSpeech, synthesizeSpeechStream, splitIntoSentences, STREAMING
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
 import { extractAndUpdateState } from './voice-state.js';
-import { detectChannelCommand, resolveChannel, loadDirective, moveToVoiceChannel } from './channel-router.js';
+// Channel routing disabled - brain handles focus commands naturally
+// import { detectChannelCommand, resolveChannel, loadDirective, moveToVoiceChannel } from './channel-router.js';
 import { shouldDelegate, spawnBackgroundAgent, pollAgentCompletion, extractTLDR } from './agent-delegate.js';
 import { classifyIntent } from './intent-classifier.js';
 import { queueAlert, hasPendingAlerts, getPendingAlerts, clearAlerts } from './alert-queue.js';
@@ -592,119 +593,8 @@ async function handleSpeech(userId, audioBuffer) {
       return; // Don't proceed to brain
     }
     
-    // Check for channel commands BEFORE brain call
-    const channelCmd = detectChannelCommand(transcript);
-    if (channelCmd.action) {
-      console.log(`🔀 Channel command detected: ${channelCmd.action} → ${channelCmd.target || 'query'}`);
-      markBotResponse(userId);
-      isProcessing = false; // Release lock immediately for channel commands
-      
-      if (channelCmd.action === 'query') {
-        // Answer "where am I" / "what context"
-        let response = '';
-        if (activeContext) {
-          const vcName = channelRegistry.voiceChannels?.[currentVoiceChannelId]?.name || 'unknown';
-          response = `I'm in the ${vcName} voice channel, focused on ${activeContext.channelName}.`;
-        } else {
-          const vcName = channelRegistry.voiceChannels?.[currentVoiceChannelId]?.name || 'unknown';
-          response = `I'm in the ${vcName} voice channel with no specific context loaded.`;
-        }
-        
-        const audio = await synthesizeSpeech(response);
-        await playAudio(audio);
-        try { unlinkSync(audio); } catch {}
-        return;
-      }
-      
-      if (channelCmd.action === 'move') {
-        // Resolve target channel and move voice connection
-        const resolved = resolveChannel(channelCmd.target, channelRegistry);
-        if (!resolved) {
-          const audio = await synthesizeSpeech(`I don't know that channel.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-          return;
-        }
-        
-        if (!resolved.voiceChannelId) {
-          const audio = await synthesizeSpeech(`${resolved.channelName} doesn't have a voice channel.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-          return;
-        }
-        
-        try {
-          // Destroy old connection
-          if (currentConnection) {
-            currentConnection.destroy();
-          }
-          
-          // Join new voice channel (no greeting)
-          await joinChannel(resolved.voiceChannelId, { greeting: false });
-          
-          // Load directive if available
-          if (resolved.directivePath) {
-            const directive = loadDirective(resolved.directivePath);
-            activeContext = {
-              channelId: resolved.channelId,
-              channelName: resolved.channelName,
-              directive,
-              directivePath: resolved.directivePath,
-              voiceChannelId: resolved.voiceChannelId,
-            };
-          } else {
-            activeContext = null;
-          }
-          
-          const audio = await synthesizeSpeech(`Moving to ${resolved.channelName}.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-        } catch (err) {
-          console.error('❌ Failed to move voice channel:', err.message);
-          const audio = await synthesizeSpeech(`Failed to move. ${err.message}`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-        }
-        return;
-      }
-      
-      if (channelCmd.action === 'focus') {
-        // Load directive without moving voice channel
-        const resolved = resolveChannel(channelCmd.target, channelRegistry);
-        if (!resolved) {
-          const audio = await synthesizeSpeech(`I don't know that context.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-          return;
-        }
-        
-        if (!resolved.directivePath) {
-          const audio = await synthesizeSpeech(`${resolved.channelName} doesn't have a directive.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-          return;
-        }
-        
-        const directive = loadDirective(resolved.directivePath);
-        if (directive) {
-          activeContext = {
-            channelId: resolved.channelId,
-            channelName: resolved.channelName,
-            directive,
-            directivePath: resolved.directivePath,
-            voiceChannelId: currentVoiceChannelId, // Stay in current VC
-          };
-          const audio = await synthesizeSpeech(`Focused on ${resolved.channelName}.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-        } else {
-          const audio = await synthesizeSpeech(`Failed to load ${resolved.channelName} directive.`);
-          await playAudio(audio);
-          try { unlinkSync(audio); } catch {}
-        }
-        return;
-      }
-    }
+    // Channel focus commands now handled by brain (like a skill)
+    // The brain can naturally understand "focus on X" and respond accordingly
     
     // 3. Optional immediate ack (feature-flagged)
     const IMMEDIATE_ACKS_ENABLED = process.env.IMMEDIATE_ACKS_ENABLED === 'true';
