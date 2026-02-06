@@ -20,8 +20,8 @@ const MOVE_PATTERNS = [
 ];
 
 const FOCUS_PATTERNS = [
-  /\b(?:focus on|switch to|context|work on)\s+(?:the\s+)?(.+?)$/i,
-  /\b(?:let'?s work on)\s+(?:the\s+)?(.+?)$/i,
+  /\b(?:focus on|switch to)\s+(?:the\s+)?(\w+(?:\s+\w+)?)$/i,  // Max 2 words
+  /\b(?:jarvis)\s+(\w+)$/i,  // "jarvis security", "jarvis gibson"
 ];
 
 const QUERY_PATTERNS = [
