@@ -640,51 +640,94 @@ async function handleSpeech(userId, audioBuffer) {
       previousResponseType: conv.lastResponseType,
     };
     
-    // Classify intent for delegation decision
+    // Classify intent for hybrid routing
     const { type: intentType } = classifyIntent({ transcript, ...classificationSignals });
     
-    // Check if auto-delegation is enabled (feature flag)
-    const AUTO_DELEGATION_ENABLED = process.env.AUTO_DELEGATION_ENABLED === 'true';
-    const shouldDelegateTask = AUTO_DELEGATION_ENABLED && shouldDelegate(transcript, intentType);
+    // ── HYBRID ROUTING ──────────────────────────────────────────────
+    // Quick queries → direct brain response in voice
+    // Work commands → delegate to background agent + voice ack + notify when done
+    //
+    // Work commands are ACTION intents that contain "work" verbs:
+    // build, deploy, create schema, investigate, set up, configure, etc.
+    const WORK_VERBS = /\b(build|deploy|create|set up|configure|install|investigate|research|analyze|work on|design|implement|migrate|refactor|fix|debug|clean up|archive|organize|schema|write|draft|review and fix)\b/i;
+    const isWorkCommand = intentType === 'ACTION' && WORK_VERBS.test(transcript);
     
-    if (shouldDelegateTask) {
-      // Delegate to background agent
-      const outputChannel = process.env.DISCORD_VOICE_CHANNEL_ID; // Discord channel for background agent output
-      console.log(`🤖 Delegating to background agent: "${transcript}"`);
+    if (isWorkCommand) {
+      // Determine output channel: active context > voice channel > fallback
+      const outputChannel = activeContext?.channelId || 
+                           process.env.DISCORD_TEXT_CHANNEL_ID || 
+                           process.env.DISCORD_VOICE_CHANNEL_ID;
       
+      console.log(`🤖 Work command detected, delegating: "${transcript}"`);
+      console.log(`📤 Output channel: ${outputChannel}`);
+      
+      // Voice ack FIRST - tell user we're working on it
+      const workAcks = [
+        "On it. I'll message you when it's done.",
+        "Working on it. I'll post the results when ready.",
+        "Got it. I'll let you know when that's complete.",
+        "Handling it now. I'll update you shortly.",
+      ];
+      const ack = workAcks[Math.floor(Math.random() * workAcks.length)];
+      const ackAudio = await synthesizeSpeech(ack);
+      await playAudio(ackAudio);
+      try { unlinkSync(ackAudio); } catch {}
+      
+      // Spawn background agent
       const agent = await spawnBackgroundAgent(transcript, activeContext, outputChannel);
       
       if (agent) {
-        // Silent delegation - no confirmation spoken
+        // Track active task
+        if (!conversations.has('_activeTasks')) {
+          conversations.set('_activeTasks', []);
+        }
+        conversations.get('_activeTasks').push({
+          sessionKey: agent.sessionKey,
+          task: transcript,
+          startedAt: Date.now(),
+          outputChannel,
+        });
         
         // Mark bot response to keep conversation window open
         markBotResponse(userId);
         
-        // Monitor Discord for agent completion and announce in voice
+        // Monitor for completion and notify via voice + DM
         monitorAgentCompletion(agent.sessionKey, outputChannel).then(async (summary) => {
           if (summary) {
             console.log(`📢 Agent completed, announcing: "${summary}"`);
-            const announcementAudio = await synthesizeSpeech(`Task complete. ${summary}`);
-            await playAudio(announcementAudio);
-            try { unlinkSync(announcementAudio); } catch {}
+            
+            // Voice announcement if user is still in channel
+            try {
+              const announcementAudio = await synthesizeSpeech(`Task complete. ${summary}`);
+              await playAudio(announcementAudio);
+              try { unlinkSync(announcementAudio); } catch {}
+            } catch (err) {
+              console.error(`⚠️  Voice announcement failed: ${err.message}`);
+            }
+            
+            // Also DM the user
+            try {
+              const user = await client.users.fetch(userId);
+              await user.send(`✅ **Voice Task Complete:**\n${summary}`);
+              console.log(`📱 Completion DM sent to user ${userId}`);
+            } catch (err) {
+              console.error(`⚠️  Completion DM failed: ${err.message}`);
+            }
           }
         }).catch(err => {
           console.error(`⚠️  Agent monitoring error: ${err.message}`);
         });
+        
+        isProcessing = false;
+        return;
       } else {
         // Fallback if spawn fails - continue to normal brain call
         console.log('⚠️  Agent spawn failed, falling back to direct response');
-        const errorAudio = await synthesizeSpeech("Let me handle that directly.");
+        const errorAudio = await synthesizeSpeech("Delegation failed. Handling it directly.");
         await playAudio(errorAudio);
         try { unlinkSync(errorAudio); } catch {}
-        // Continue to brain call below (don't return)
+        // Fall through to brain call
       }
-      
-      // If agent spawn succeeded, we're done - it will post results
-      if (agent) {
-        return;
-      }
-      // Otherwise fall through to normal brain processing
     }
     
     // 5. Generate response via Clawdbot Gateway (runs while ack plays)
