@@ -104,6 +104,18 @@ export function classifyIntent(signals) {
     });
   }
   
+  // QUERY - Information requests (check BEFORE ACTION to catch questions with action verbs)
+  if (lower.match(/\b(what|when|where|who|which|how many|how much|is there|do i have|did|does|can you|could you|would you|any|find)\b/) ||
+      lower.match(/\?$/)) {  // Also check for question mark at end
+    return buildBudget('QUERY', {
+      maxSentences: 4,
+      maxSpokenSeconds: 12,
+      responseStyle: 'concise-answer',
+      spillover: false,
+      budgetInstruction: 'RESPONSE BUDGET: Direct query. Answer in ≤4 sentences. Lead with the answer, not "Let me check." If listing items, max 3 spoken, then say how many more and offer details. Example: "Yes, 2 meetings today. 2pm standup and 4pm review. Both in conference room A."',
+    });
+  }
+  
   // ACTION - Task execution commands
   if (lower.match(/\b(clean|archive|delete|remove|send|post|message|move|schedule|remind|set up|create|add|update|cancel|clear|mark|flag|snooze|forward|reply|draft|setup|configure|install|deploy|run|execute|start|stop|restart|kill|check out|clone|pull|push|commit|merge)\b/)) {
     return buildBudget('ACTION', {
@@ -151,17 +163,6 @@ export function classifyIntent(signals) {
       spillover: true,
       spilloverHint: 'post full analysis to Discord text',
       budgetInstruction: 'RESPONSE BUDGET: Detail requested. Up to 8 sentences OK. Be thorough but still conversational. If very complex, give the verbal summary and offer to post the full analysis to text. Lead with the key insight, then supporting details.',
-    });
-  }
-  
-  // QUERY - Information requests (default for questions)
-  if (lower.match(/\b(what|when|where|who|which|how many|how much|is there|do i have|did|does|can you|could you|would you|check|any|find)\b/)) {
-    return buildBudget('QUERY', {
-      maxSentences: 4,
-      maxSpokenSeconds: 12,
-      responseStyle: 'concise-answer',
-      spillover: false,
-      budgetInstruction: 'RESPONSE BUDGET: Direct query. Answer in ≤4 sentences. Lead with the answer, not "Let me check." If listing items, max 3 spoken, then say how many more and offer details. Example: "Yes, 2 meetings today. 2pm standup and 4pm review. Both in conference room A."',
     });
   }
   
