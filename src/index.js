@@ -855,13 +855,17 @@ async function handleSpeech(userId, audioBuffer) {
     // Post long responses to Discord text channel (like text chat does)
     const TEXT_SPILLOVER_CHARS = parseInt(process.env.TEXT_SPILLOVER_CHARS) || 300;
     if (response.length > TEXT_SPILLOVER_CHARS) {
-      const textChannelId = process.env.DISCORD_TEXT_CHANNEL_ID || process.env.DISCORD_VOICE_CHANNEL_ID;
+      // Use active context channel if set, otherwise fall back to configured text channel
+      const textChannelId = activeContext?.channelId || 
+                           process.env.DISCORD_TEXT_CHANNEL_ID || 
+                           process.env.DISCORD_VOICE_CHANNEL_ID;
       if (textChannelId) {
         try {
           const channel = client.channels.cache.get(textChannelId);
           if (channel) {
-            await channel.send(`🎙️ **Voice Response:**\n${response}`);
-            console.log(`📝 Long response posted to text channel ${textChannelId}`);
+            const contextLabel = activeContext ? ` (${activeContext.channelName})` : '';
+            await channel.send(`🎙️ **Voice Response${contextLabel}:**\n${response}`);
+            console.log(`📝 Long response posted to text channel ${textChannelId}${contextLabel}`);
           }
         } catch (err) {
           console.error(`⚠️  Failed to post to text channel: ${err.message}`);
