@@ -852,6 +852,23 @@ async function handleSpeech(userId, audioBuffer) {
     conv.lastResponseType = responseType || null;
     console.log(`📊 Conversation depth: ${conv.depth}, Last response type: ${conv.lastResponseType}`);
     
+    // Post long responses to Discord text channel (like text chat does)
+    const TEXT_SPILLOVER_CHARS = parseInt(process.env.TEXT_SPILLOVER_CHARS) || 300;
+    if (response.length > TEXT_SPILLOVER_CHARS) {
+      const textChannelId = process.env.DISCORD_TEXT_CHANNEL_ID || process.env.DISCORD_VOICE_CHANNEL_ID;
+      if (textChannelId) {
+        try {
+          const channel = client.channels.cache.get(textChannelId);
+          if (channel) {
+            await channel.send(`🎙️ **Voice Response:**\n${response}`);
+            console.log(`📝 Long response posted to text channel ${textChannelId}`);
+          }
+        } catch (err) {
+          console.error(`⚠️  Failed to post to text channel: ${err.message}`);
+        }
+      }
+    }
+    
     // 5. Synthesize and play speech (streaming or batch)
     if (STREAMING_TTS_ENABLED && response.length > 100) {
       // Streaming mode: split into sentences and stream
