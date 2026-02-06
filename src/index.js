@@ -855,21 +855,27 @@ async function handleSpeech(userId, audioBuffer) {
     // Post long responses to Discord text channel (like text chat does)
     const TEXT_SPILLOVER_CHARS = parseInt(process.env.TEXT_SPILLOVER_CHARS) || 300;
     if (response.length > TEXT_SPILLOVER_CHARS) {
-      // Use active context channel if set, otherwise fall back to configured text channel
-      const textChannelId = activeContext?.channelId || 
-                           process.env.DISCORD_TEXT_CHANNEL_ID || 
-                           process.env.DISCORD_VOICE_CHANNEL_ID;
-      if (textChannelId) {
+      // Post to active context channel if set
+      if (activeContext?.channelId) {
         try {
-          const channel = client.channels.cache.get(textChannelId);
+          const channel = client.channels.cache.get(activeContext.channelId);
           if (channel) {
-            const contextLabel = activeContext ? ` (${activeContext.channelName})` : '';
-            await channel.send(`🎙️ **Voice Response${contextLabel}:**\n${response}`);
-            console.log(`📝 Long response posted to text channel ${textChannelId}${contextLabel}`);
+            await channel.send(`🎙️ **Voice Response (${activeContext.channelName}):**\n${response}`);
+            console.log(`📝 Long response posted to context channel ${activeContext.channelId} (${activeContext.channelName})`);
           }
         } catch (err) {
-          console.error(`⚠️  Failed to post to text channel: ${err.message}`);
+          console.error(`⚠️  Failed to post to context channel: ${err.message}`);
         }
+      }
+      
+      // Also send DM to user for record-keeping
+      try {
+        const user = await client.users.fetch(userId);
+        const contextLabel = activeContext ? ` [${activeContext.channelName}]` : '';
+        await user.send(`🎙️ **Voice${contextLabel}:**\n${response}`);
+        console.log(`📱 Long response sent as DM to user ${userId}`);
+      } catch (err) {
+        console.error(`⚠️  Failed to send DM: ${err.message}`);
       }
     }
     
