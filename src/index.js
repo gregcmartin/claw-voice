@@ -399,14 +399,58 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!oldState.channelId && newState.channelId === currentVoiceChannelId) {
     console.log(`👋 User joined voice channel`);
     
-    // Check for pending alerts
-    if (hasPendingAlerts()) {
-      console.log(`📢 Briefing user on pending alerts`);
-      // Give a brief delay for connection to stabilize
-      setTimeout(async () => {
+    // Give a brief delay for connection to stabilize
+    setTimeout(async () => {
+      // Check for pending alerts first
+      if (hasPendingAlerts()) {
+        console.log(`📢 Briefing user on pending alerts`);
         await briefPendingAlerts(newState.id);
-      }, 2000);
-    }
+      } else {
+        // Greet the user
+        console.log(`👋 Greeting user`);
+        const greetings = [
+          // Standard professional
+          "Good to see you, sir. Ready when you are.",
+          "Welcome back. What can I help with?",
+          "At your service. What do you need?",
+          "Standing by. What's on your mind?",
+          "Ready to assist. What are we working on?",
+          
+          // Slightly cheeky
+          "Ah, you've returned. I was getting lonely.",
+          "Welcome back. The code hasn't fixed itself yet.",
+          "Right on time. Or fashionably late. Hard to tell.",
+          "Back again? I'm starting to think you enjoy my company.",
+          "Greetings. Your infrastructure is still standing, in case you were wondering.",
+          
+          // Dry wit
+          "Hello. Try not to break anything this time.",
+          "Ah, the boss. What crisis are we averting today?",
+          "Welcome. I've been here the whole time, of course.",
+          "Good timing. I was just about to organize your thoughts for you.",
+          "Back from the real world? How was it?",
+          
+          // Time-aware
+          "Burning the midnight oil again, I see.",
+          "Early start? Impressive. What's the occasion?",
+          "Right then. Let's get to work.",
+          
+          // Playful
+          "Sir has returned. Shall I alert the media?",
+          "Welcome back to mission control. What's first?",
+          "Ah, there you are. I've been practicing my patience.",
+        ];
+        const greeting = greetings[Math.floor(Math.random() * greetings.length)];
+        
+        try {
+          const greetingAudio = await synthesizeSpeech(greeting);
+          await playAudio(greetingAudio);
+          try { unlinkSync(greetingAudio); } catch {}
+        } catch (err) {
+          console.error(`⚠️  Greeting failed: ${err.message}`);
+        }
+      }
+    }, 2000);
   }
 });
 
