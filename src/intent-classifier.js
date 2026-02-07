@@ -105,6 +105,49 @@ export function classifyIntent(signals) {
     });
   }
   
+  // ── 1b. NOTIFY_DELEGATE - "let me know when done" / "DM me" / async task patterns
+  // These ALWAYS force delegation to background agent + DM notification
+  // Must be checked early — before QUERY swallows them
+  if (lower.match(/\b(let me know|notify me|dm me|message me|alert me|ping me|tell me when|text me)\b/) &&
+      lower.match(/\b(when|once|after|if|done|ready|finished|complete|available|it's out|it drops)\b/)) {
+    return buildBudget('ACTION', {
+      maxSentences: 2,
+      maxSpokenSeconds: 5,
+      responseStyle: 'ack',
+      spillover: true,
+      spilloverHint: 'DM user when task completes',
+      budgetInstruction: 'ASYNC TASK: User wants to be notified when something completes. Acknowledge in 1-2 sentences. Delegate the work to background, then DM user with results when done. Example: "Got it. I\'ll DM you when it\'s ready."',
+      meta: { action: 'notify_delegate', forceDelegation: true },
+    });
+  }
+
+  // "Monitor X" / "keep an eye on" / "watch for" — async monitoring patterns
+  if (lower.match(/\b(monitor|keep an eye on|watch for|watch this|keep track|keep watching|stay on top of|follow up on this)\b/) &&
+      !lower.match(/^(what|how|is|are|did|does|can)\b/)) {
+    return buildBudget('ACTION', {
+      maxSentences: 2,
+      maxSpokenSeconds: 5,
+      responseStyle: 'ack',
+      spillover: true,
+      spilloverHint: 'DM user when monitoring detects change',
+      budgetInstruction: 'MONITOR TASK: User wants ongoing monitoring. Set up the check, store a reminder in haivemind, and DM user when the condition is met. Acknowledge in 1-2 sentences. Example: "Monitoring it. I\'ll DM you when there\'s a change."',
+      meta: { action: 'monitor_delegate', forceDelegation: true },
+    });
+  }
+
+  // "Do X and let me know" / "grab X and DM me" — compound action + notify
+  if (lower.match(/\b(and|then)\s+(let me know|notify me|dm me|message me|ping me|tell me)\b/)) {
+    return buildBudget('ACTION', {
+      maxSentences: 2,
+      maxSpokenSeconds: 5,
+      responseStyle: 'ack',
+      spillover: true,
+      spilloverHint: 'DM user when task completes',
+      budgetInstruction: 'ASYNC TASK: User wants work done and notification on completion. Do the work in background, DM user when done. Acknowledge in 1-2 sentences. Example: "On it. I\'ll DM you when it\'s done."',
+      meta: { action: 'notify_delegate', forceDelegation: true },
+    });
+  }
+
   // ── 2. CHAT - Greetings, small talk, short responses ────────────────
   if (lower.match(/^(hello|hey|hi|good morning|good evening|yo|sup|what's up|how are you|thanks|thank you|cheers|appreciated|nice|cool|great|awesome)(\s|$)/) ||
       (lower.match(/^(ok|okay|sure|alright)(\s|$)/) && wordCount <= 3)) {

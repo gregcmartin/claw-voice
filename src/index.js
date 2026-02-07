@@ -35,6 +35,8 @@ import { queueAlert, hasPendingAlerts, getPendingAlerts, clearAlerts } from './a
 import { startAlertWebhook, initAlertWebhook, setCurrentVoiceChannelId } from './alert-webhook.js';
 
 const HEARTBEAT_ENABLED = process.env.HEARTBEAT_ENABLED === 'true';
+const GATEWAY_URL = process.env.CLAWDBOT_GATEWAY_URL || 'http://127.0.0.1:22100';
+const GATEWAY_TOKEN = process.env.CLAWDBOT_GATEWAY_TOKEN;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TMP_DIR = join(__dirname, '..', 'tmp');
@@ -227,12 +229,18 @@ function scheduleBriefingOnPause(userId) {
 }
 
 // Monitor Discord channel for agent completion message
-async function monitorAgentCompletion(sessionKey, channelId, timeoutMs = 120000) {
+async function monitorAgentCompletion(sessionKey, channelId, timeoutMs = 600000) {
+  // 10 minute timeout — real work takes time (code refactors, research, etc.)
   const startTime = Date.now();
-  const pollInterval = 10000; // Check every 10 seconds
+  const pollInterval = 15000; // Check every 15 seconds
+  const ALLOWED_USER_ID = process.env.ALLOWED_USERS?.split(',')[0];
+  
+  console.log(`👁️  Monitoring agent ${sessionKey} (timeout: ${timeoutMs / 1000}s)`);
+  
+  // Strategy 1: Poll the gateway hook session for completion
+  // Strategy 2: Watch Discord channel for new bot messages (fallback)
   let lastMessageId = null;
   
-  // Get current last message ID
   try {
     const channel = client.channels.cache.get(channelId);
     if (channel) {
@@ -246,37 +254,78 @@ async function monitorAgentCompletion(sessionKey, channelId, timeoutMs = 120000)
   while (Date.now() - startTime < timeoutMs) {
     await new Promise(resolve => setTimeout(resolve, pollInterval));
     
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    
     try {
+      // Strategy 1: Check if hook session completed via gateway API
+      const hookRes = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GATEWAY_TOKEN}`,
+        },
+        body: JSON.stringify({
+          model: 'clawdbot:main',
+          messages: [{ role: 'user', content: 'HEARTBEAT_OK' }],
+          max_tokens: 1,
+          user: sessionKey.replace('hook:', 'poll:'),
+        }),
+      }).catch(() => null);
+      // We don't actually need the response — just checking if gateway is alive
+      
+      // Strategy 2: Watch Discord channel for new messages from the bot (Clawdbot)
       const channel = client.channels.cache.get(channelId);
       if (!channel) continue;
       
-      // Fetch messages after last known message
       const messages = await channel.messages.fetch({ 
-        limit: 5,
+        limit: 10,
         after: lastMessageId,
       });
       
       if (messages.size > 0) {
-        // Look for bot's completion message
-        const botMessage = messages.find(m => 
-          m.author.id === client.user.id && 
-          (m.content.includes('What was done:') || m.content.includes('completed'))
+        // Look for any bot message that looks like task output
+        // The hook agent posts under Clawdbot's identity, not voice bot's
+        const completionMsg = messages.find(m => 
+          m.author.bot && 
+          (m.content.includes('What was done') || 
+           m.content.includes('completed') ||
+           m.content.includes('Done.') ||
+           m.content.includes('refactor') ||
+           m.content.includes('✅') ||
+           m.content.includes('Key results') ||
+           m.content.length > 200) // Long bot messages are likely task output
         );
         
-        if (botMessage) {
-          // Extract first sentence as summary
-          const firstSentence = botMessage.content.split(/[.!?]/)[0];
-          return firstSentence || 'Done';
+        if (completionMsg) {
+          console.log(`✅ Agent completed after ${elapsed}s`);
+          const summary = completionMsg.content.substring(0, 300).split(/[.!?]\s/)[0];
+          return summary || 'Task complete';
         }
         
         lastMessageId = messages.first().id;
       }
+      
+      if (elapsed % 60 === 0) {
+        console.log(`👁️  Still monitoring agent... (${elapsed}s elapsed)`);
+      }
+      
     } catch (err) {
       console.error(`⚠️  Agent monitoring error: ${err.message}`);
     }
   }
   
-  console.log('⏱️  Agent monitoring timeout');
+  // Timeout — notify user anyway
+  console.log(`⏱️  Agent monitoring timeout after ${timeoutMs / 1000}s`);
+  
+  // DM user that we lost track but work may still be in progress
+  try {
+    const user = await client.users.fetch(ALLOWED_USER_ID);
+    await user.send(`⏱️ **Voice Task Update:** Background task timed out on monitoring (${timeoutMs / 1000}s). The work may still be in progress — check the text channel for results.`);
+    console.log('📱 Timeout DM sent to user');
+  } catch (err) {
+    console.error(`⚠️  Timeout DM failed: ${err.message}`);
+  }
+  
   return null;
 }
 
@@ -411,7 +460,7 @@ async function joinChannel(voiceChannelId, options = {}) {
   // Smart barge-in: track speaking start time to require sustained speech
   const bargeInTimers = new Map();
   // bargeInEvents is now in module scope
-  const BARGE_IN_THRESHOLD_MS = 1500; // Must speak 1.5s continuously to interrupt
+  const BARGE_IN_THRESHOLD_MS = 600; // Must speak 0.6s continuously to interrupt
   
   // Cancel barge-in timer if user stops speaking quickly (echo/blip)
   receiver.speaking.on('end', (userId) => {
@@ -641,16 +690,20 @@ async function handleSpeech(userId, audioBuffer) {
     };
     
     // Classify intent for hybrid routing
-    const { type: intentType } = classifyIntent({ transcript, ...classificationSignals });
+    const classification = classifyIntent({ transcript, ...classificationSignals });
+    const intentType = classification.type;
     
     // ── HYBRID ROUTING ──────────────────────────────────────────────
     // Quick queries → direct brain response in voice
     // Work commands → delegate to background agent + voice ack + notify when done
     //
-    // Work commands are ACTION intents that contain "work" verbs or delegation structures
+    // Work commands are ACTION intents that contain "work" verbs, delegation structures,
+    // or forceDelegation flag from notify/monitor patterns
     const WORK_VERBS = /\b(build|deploy|create|set up|configure|install|investigate|research|analyze|work on|design|implement|migrate|refactor|fix|debug|clean up|archive|organize|schema|write|draft|review|generate|compile|prepare|test|run|execute|apply|push|pull|sync|update|document|validate|verify|monitor|track|follow up|get started|take care|handle|start|begin|continue|proceed)\b/i;
     const WORK_STRUCTURES = /\b(go ahead and|let's (work on|build|create|implement|fix)|I need you to|can you please|would you mind|when you get a chance)\b/i;
-    const isWorkCommand = intentType === 'ACTION' && (WORK_VERBS.test(transcript) || WORK_STRUCTURES.test(transcript));
+    const NOTIFY_PATTERNS = /\b(let me know|notify me|dm me|message me|alert me|ping me|tell me when|text me).*(when|done|ready|finished|complete|available)\b/i;
+    const forceDelegation = classification.meta?.forceDelegation === true;
+    const isWorkCommand = forceDelegation || (intentType === 'ACTION' && (WORK_VERBS.test(transcript) || WORK_STRUCTURES.test(transcript) || NOTIFY_PATTERNS.test(transcript)));
     
     if (isWorkCommand) {
       // Determine output channel: active context > voice channel > fallback
