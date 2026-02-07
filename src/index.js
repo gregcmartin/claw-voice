@@ -228,6 +228,75 @@ function scheduleBriefingOnPause(userId) {
   console.log(`📢 Alert briefing scheduled for ${userId} on next pause`);
 }
 
+// Generate dynamic greeting using the brain
+async function generateDynamicGreeting() {
+  const now = new Date();
+  const hour = now.getHours();
+  const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
+  const dayOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][now.getDay()];
+  
+  const prompt = `You are Jarvis, Lance's British AI butler. He just joined the voice channel. Generate ONE short greeting (1-2 sentences max, under 20 words).
+
+Context: ${timeOfDay}, ${dayOfWeek}
+
+Style guide:
+- Professional but with personality
+- British butler wit (think: understated, dry, occasionally playful)
+- No repetition - be creative and varied
+- Mix of: welcoming, witty observations, time-aware comments, playful jabs
+- Never sycophantic or overly formal
+- Keep it natural and conversational
+
+Examples of the vibe:
+- "Ah, you've returned. I was getting lonely."
+- "Burning the midnight oil again, I see."
+- "Welcome back. Try not to break anything this time."
+- "Right on time. Or fashionably late. Hard to tell."
+- "Good ${timeOfDay}. What crisis are we averting today?"
+
+Generate ONE unique greeting now (no quotes, just the text):`;
+
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GATEWAY_TOKEN}`,
+      },
+      body: JSON.stringify({
+        model: 'anthropic/claude-haiku-4-5', // Fast for greetings
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 50,
+        temperature: 0.9, // High temperature for variety
+      }),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Gateway ${response.status}`);
+    }
+    
+    const data = await response.json();
+    let greeting = data.choices?.[0]?.message?.content?.trim() || "Welcome back, sir.";
+    
+    // Clean up any quotes or formatting
+    greeting = greeting.replace(/^["']|["']$/g, '').trim();
+    
+    console.log(`💬 Generated greeting: "${greeting}"`);
+    return greeting;
+    
+  } catch (err) {
+    console.error(`⚠️  Dynamic greeting generation failed: ${err.message}`);
+    // Fallback greetings
+    const fallbacks = [
+      "Welcome back, sir.",
+      "At your service.",
+      "Ready when you are.",
+      "Standing by.",
+    ];
+    return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+  }
+}
+
 // Monitor Discord channel for agent completion message
 async function monitorAgentCompletion(sessionKey, channelId, timeoutMs = 600000) {
   // 10 minute timeout — real work takes time (code refactors, research, etc.)
@@ -406,48 +475,22 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         console.log(`📢 Briefing user on pending alerts`);
         await briefPendingAlerts(newState.id);
       } else {
-        // Greet the user
-        console.log(`👋 Greeting user`);
-        const greetings = [
-          // Standard professional
-          "Good to see you, sir. Ready when you are.",
-          "Welcome back. What can I help with?",
-          "At your service. What do you need?",
-          "Standing by. What's on your mind?",
-          "Ready to assist. What are we working on?",
-          
-          // Slightly cheeky
-          "Ah, you've returned. I was getting lonely.",
-          "Welcome back. The code hasn't fixed itself yet.",
-          "Right on time. Or fashionably late. Hard to tell.",
-          "Back again? I'm starting to think you enjoy my company.",
-          "Greetings. Your infrastructure is still standing, in case you were wondering.",
-          
-          // Dry wit
-          "Hello. Try not to break anything this time.",
-          "Ah, the boss. What crisis are we averting today?",
-          "Welcome. I've been here the whole time, of course.",
-          "Good timing. I was just about to organize your thoughts for you.",
-          "Back from the real world? How was it?",
-          
-          // Time-aware
-          "Burning the midnight oil again, I see.",
-          "Early start? Impressive. What's the occasion?",
-          "Right then. Let's get to work.",
-          
-          // Playful
-          "Sir has returned. Shall I alert the media?",
-          "Welcome back to mission control. What's first?",
-          "Ah, there you are. I've been practicing my patience.",
-        ];
-        const greeting = greetings[Math.floor(Math.random() * greetings.length)];
-        
+        // Generate dynamic greeting
+        console.log(`👋 Generating dynamic greeting`);
         try {
+          const greeting = await generateDynamicGreeting();
           const greetingAudio = await synthesizeSpeech(greeting);
           await playAudio(greetingAudio);
           try { unlinkSync(greetingAudio); } catch {}
         } catch (err) {
           console.error(`⚠️  Greeting failed: ${err.message}`);
+          // Fallback to simple greeting
+          try {
+            const fallback = "Welcome back, sir.";
+            const fallbackAudio = await synthesizeSpeech(fallback);
+            await playAudio(fallbackAudio);
+            try { unlinkSync(fallbackAudio); } catch {}
+          } catch {}
         }
       }
     }, 2000);
