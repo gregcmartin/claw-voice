@@ -20,6 +20,11 @@ const TOOL_KEYWORDS = [
   'list', 'show me', 'give me', 'what are', 'what\'s on',
   'archive', 'cleanup', 'organize', 'delete', 'move',
   'post', 'send', 'message', 'notify', 'alert',
+  'deploy', 'build', 'implement', 'migrate', 'configure', 'install',
+  'generate', 'compile', 'document', 'validate', 'verify',
+  'monitor', 'track', 'sync', 'push', 'pull', 'commit',
+  'design', 'schema', 'refactor', 'debug', 'fix',
+  'study', 'plan', 'todo', 'exec', 'admin',
 ];
 
 /**
@@ -31,12 +36,19 @@ const TOOL_KEYWORDS = [
  */
 export function shouldDelegate(transcript, intentType) {
   // NEVER delegate these intent types (immediate voice response)
-  if (intentType === 'CHAT' || intentType === 'FOLLOW_UP' || intentType === 'SUMMARIZE' || intentType === 'EMAIL_DETAIL') {
+  const VOICE_ONLY = ['CHAT', 'FOLLOW_UP', 'SUMMARIZE', 'EMAIL_DETAIL', 'MEMORY_CMD', 'ADMIN_CMD'];
+  if (VOICE_ONLY.includes(intentType)) {
     return false;
   }
   
-  // Always delegate these intent types
-  if (intentType === 'ACTION' || intentType === 'LIST_QUERY') {
+  // EMAIL_QUERY and CALENDAR are voice-first but may need tools (handled by brain, not delegation)
+  if (intentType === 'EMAIL_QUERY' || intentType === 'CALENDAR' || intentType === 'CALENDAR_ACTION') {
+    return false;  // Brain handles these with tool access via gateway
+  }
+  
+  // Always delegate these intent types (heavy work)
+  const ALWAYS_DELEGATE = ['ACTION', 'LIST_QUERY', 'EMAIL_ACTION', 'PLAN_CMD', 'STUDY_CMD'];
+  if (ALWAYS_DELEGATE.includes(intentType)) {
     console.log(`🎯 Delegation trigger: intent type = ${intentType}`);
     return true;
   }
