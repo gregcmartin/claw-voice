@@ -86,21 +86,92 @@ async function getDiscordContext() {
 /**
  * Build dynamic voice prefix with intent-based budget constraints
  */
+import { readFileSync, existsSync } from 'fs';
+
+/**
+ * Build workspace/memory context for the voice agent
+ * This gives the voice bot the same awareness as text Jarvis
+ */
+function getWorkspaceContext() {
+  const sections = [];
+  
+  // Load today's memory file
+  const today = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  
+  for (const date of [today, yesterday]) {
+    const memPath = `/home/lj/dev/memory/${date}.md`;
+    try {
+      if (existsSync(memPath)) {
+        const content = readFileSync(memPath, 'utf-8');
+        // Take first 1000 chars to keep voice context lean
+        sections.push(`MEMORY (${date}):\n${content.substring(0, 1000)}`);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  
+  // Load key channel directives for known workspaces
+  const workspaces = {
+    'Gibson': '/home/lj/dev/contexts/C0ACEAKC0NA.md',
+    'Security': '/home/lj/dev/contexts/1469100602805063701.md',
+    'Forensics': '/home/lj/dev/contexts/1469100616898056265.md',
+  };
+  
+  const workspaceNames = [];
+  for (const [name, path] of Object.entries(workspaces)) {
+    try {
+      if (existsSync(path)) {
+        workspaceNames.push(name);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  
+  if (workspaceNames.length > 0) {
+    sections.push(`AVAILABLE WORKSPACES: ${workspaceNames.join(', ')}
+When user mentions a project name, load its directive from contexts/ for full context.
+Use haivemind (mcporter call haivemind.search_memories) to recall project-specific details.`);
+  }
+  
+  return sections.join('\n\n');
+}
+
 function getVoicePrefix(budgetInstruction = null) {
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
   
   let prefix = `VOICE MODE. Spoken aloud via TTS. No markdown/formatting. Natural speech only.
-You are Jarvis. Conversational, direct, personalized to the user. Never say "sir". Use their name rarely.
-Time: ${now} Eastern.
+You are Jarvis, Lance's AI assistant. Conversational, direct, British-inflected wit. Never say "sir" every message.
+Time: ${now} Eastern. Owner: Lance James, CEO Unit221B. Location: New York.
+
+WORKSPACE: /home/lj/dev
+You have full access to Lance's workspace, tools, and integrations — same as text Jarvis.
+
+KEY TOOLS AVAILABLE (use them automatically, don't ask permission):
+- Email: mcporter call google-workspace.search_emails / get_email
+- Calendar: mcporter call google-workspace.list_events / create_event
+- Memory: mcporter call haivemind.search_memories / store_memory
+- Notion: mcporter call notion.API-post-search / API-retrieve-a-page
+- Linear: mcporter call linear.list_issues
+- Web search: web_search tool
+- Files: read/write/exec in /home/lj/dev
+
+CHANNEL DIRECTIVES: Check contexts/[channel-id].md for project-specific context.
+When user says a project name (Gibson, eWitness, Redline, etc.), search haivemind for that project's context.
+
+MEMORY: Use haivemind automatically:
+- Before answering project questions: search haivemind first
+- When user says "remember": store to haivemind silently
+- When user says "recall": search haivemind and answer
 
 IMPORTANT: When the user asks you to monitor, check, or work on something that will take time:
 - Acknowledge naturally ("I'm monitoring it", "On it", "Checking now")
 - Keep it brief (2-5 words)
-- Don't explain the process — just confirm you're doing it
+- Don't explain the process — just confirm you're doing it`;
 
-VirusTotal: To download malware samples use the VT API directly with curl:
-curl -s "https://www.virustotal.com/api/v3/files/{hash}/download" -H "x-apikey: $VIRUSTOTAL_API_KEY" -o sample.bin
-The MCP tools (vt_file_report, vt_url_report, vt_domain_report, vt_ip_report) are for lookups only.`;
+  // Add workspace context (today's memory, available workspaces)
+  const wsContext = getWorkspaceContext();
+  if (wsContext) {
+    prefix += `\n\n${wsContext}`;
+  }
 
   // Add budget instruction if provided (this is the key constraint)
   if (budgetInstruction) {
