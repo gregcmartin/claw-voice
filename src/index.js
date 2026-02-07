@@ -647,10 +647,10 @@ async function handleSpeech(userId, audioBuffer) {
     // Quick queries → direct brain response in voice
     // Work commands → delegate to background agent + voice ack + notify when done
     //
-    // Work commands are ACTION intents that contain "work" verbs:
-    // build, deploy, create schema, investigate, set up, configure, etc.
-    const WORK_VERBS = /\b(build|deploy|create|set up|configure|install|investigate|research|analyze|work on|design|implement|migrate|refactor|fix|debug|clean up|archive|organize|schema|write|draft|review and fix)\b/i;
-    const isWorkCommand = intentType === 'ACTION' && WORK_VERBS.test(transcript);
+    // Work commands are ACTION intents that contain "work" verbs or delegation structures
+    const WORK_VERBS = /\b(build|deploy|create|set up|configure|install|investigate|research|analyze|work on|design|implement|migrate|refactor|fix|debug|clean up|archive|organize|schema|write|draft|review|generate|compile|prepare|test|run|execute|apply|push|pull|sync|update|document|validate|verify|monitor|track|follow up|get started|take care|handle|start|begin|continue|proceed)\b/i;
+    const WORK_STRUCTURES = /\b(go ahead and|let's (work on|build|create|implement|fix)|I need you to|can you please|would you mind|when you get a chance)\b/i;
+    const isWorkCommand = intentType === 'ACTION' && (WORK_VERBS.test(transcript) || WORK_STRUCTURES.test(transcript));
     
     if (isWorkCommand) {
       // Determine output channel: active context > voice channel > fallback
