@@ -225,9 +225,22 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 
 // ── Voice-to-Text Handoff ────────────────────────────────────────────
 
+async function sendDM(userId, message) {
+  try {
+    const user = await client.users.fetch(userId);
+    console.log(`📤 Sending DM to user ${userId}...`);
+    await user.send(message);
+    console.log(`✅ DM sent successfully`);
+    return true;
+  } catch (err) {
+    console.error(`❌ Failed to send DM: ${err.message}`);
+    return false;
+  }
+}
+
 async function postToTextChannel(message) {
   if (!TEXT_CHANNEL_ID) {
-    console.warn('⚠️  TEXT_CHANNEL_ID not configured, cannot post handoff');
+    console.warn('⚠️  TEXT_CHANNEL_ID not configured, skipping channel post');
     return false;
   }
   
@@ -255,19 +268,19 @@ async function handleVoiceDisconnect(userId) {
   
   // Handle in-flight response (if processing)
   if (isProcessing) {
-    console.log('📤 In-flight response detected — will handoff to text when ready');
-    // The handleSpeech function will check userDisconnected flag and route to text
+    console.log('📤 In-flight response detected — will handoff via DM when ready');
+    // The handleSpeech function will check userDisconnected flag and route to DM
     return;
   }
   
   // Handle queued speech
   if (speechQueue.length > 0) {
-    console.log(`📤 Draining ${speechQueue.length} queued messages to text`);
+    console.log(`📤 Draining ${speechQueue.length} queued messages via DM`);
     const queue = [...speechQueue];
     speechQueue = [];
     
     for (const { userId, totalBuffer } of queue) {
-      // Process each queued speech but skip TTS, post to text instead
+      // Process each queued speech but skip TTS, send via DM instead
       // (This will be handled by the modified handleSpeech function)
       await handleSpeech(userId, totalBuffer);
     }
@@ -276,9 +289,9 @@ async function handleVoiceDisconnect(userId) {
   
   // Handle recent conversation handoff
   if (wasRecentlyActive && lastUserMessage) {
-    console.log(`📤 Active conversation detected — posting handoff note to text`);
-    const handoffMsg = `🎙️ Voice session ended. Last topic: "${lastUserMessage}". Continuing in text.`;
-    await postToTextChannel(handoffMsg);
+    console.log(`📤 Active conversation detected — sending handoff DM`);
+    const handoffMsg = `🎙️ Voice session ended. Last topic: "${lastUserMessage}". Continuing via DM.`;
+    await sendDM(userId, handoffMsg);
     return;
   }
   
@@ -467,11 +480,11 @@ async function handleSpeech(userId, audioBuffer) {
     history.push({ role: 'assistant', content: response });
     while (history.length > 40) history.shift();
     
-    // 7. Route output: voice (TTS) or text (handoff)
+    // 7. Route output: voice (TTS) or DM (handoff)
     if (userDisconnected) {
-      console.log('📤 User disconnected — posting response to text channel');
+      console.log('📤 User disconnected — sending response via DM');
       const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
-      await postToTextChannel(handoffMsg);
+      await sendDM(userId, handoffMsg);
       markBotResponse(userId);
       return; // Skip TTS playback
     }
