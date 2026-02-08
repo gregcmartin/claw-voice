@@ -217,17 +217,17 @@ function trimForVoice(text) {
  * email, calendar, Slack, MCP integrations, everything.
  */
 // Track current model override
-let currentModel = null; // null = default (sonnet)
+let currentModel = 'opus'; // default to opus
 
 function checkModelSwitch(msg) {
   const lower = msg.toLowerCase();
-  if (lower.match(/\b(opus|advanced)\b/)) {
-    currentModel = 'opus';
-    return 'Switched to Opus.';
+  if (lower.match(/\b(sonnet|basic)\b/) && lower.match(/\b(mode|switch|use)\b/)) {
+    currentModel = 'sonnet';
+    return 'Switched to Sonnet.';
   }
-  if (lower.match(/\b(sonnet|default|normal)\b/) && lower.match(/\b(mode|switch|use)\b/)) {
-    currentModel = null;
-    return 'Back to Sonnet.';
+  if (lower.match(/\b(opus|advanced)\b/) && lower.match(/\b(mode|switch|use)\b/)) {
+    currentModel = 'opus';
+    return 'Already on Opus.';
   }
   return null;
 }
@@ -236,12 +236,12 @@ export async function generateResponse(userMessage, history = [], classification
   // Check for model switch commands
   const switchMsg = checkModelSwitch(userMessage);
   if (switchMsg) {
-    console.log(`🧠 Model switch: ${currentModel || 'sonnet (default)'}`);
-    return { text: switchMsg, tier: currentModel || 'sonnet', needsAck: false, ackText: null, responseType: 'CHAT' };
+    console.log(`🧠 Model switch: ${currentModel}`);
+    return { text: switchMsg, tier: currentModel, needsAck: false, ackText: null, responseType: 'CHAT' };
   }
   
-  const model = currentModel === 'opus' ? 'anthropic/claude-opus-4-6' : 'clawdbot:main';
-  const tier = currentModel === 'opus' ? 'opus' : 'sonnet';
+  const model = currentModel === 'sonnet' ? 'clawdbot:main' : 'anthropic/claude-opus-4-6';
+  const tier = currentModel === 'sonnet' ? 'sonnet' : 'opus';
   console.log(`🧠 Model: ${tier}`);
   
   // Classify intent and get response budget
