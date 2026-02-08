@@ -38,6 +38,7 @@ if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
 // Config
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const VOICE_CHANNEL_ID = process.env.DISCORD_VOICE_CHANNEL_ID;
+const TEXT_CHANNEL_ID = process.env.DISCORD_TEXT_CHANNEL_ID;
 const ALLOWED_USERS = (process.env.ALLOWED_USERS || '').split(',').map(s => s.trim());
 
 // Conversation history per user (local backup — gateway session is primary)
@@ -61,6 +62,12 @@ let currentConnection = null;
 let currentVoiceChannelId = null;
 const bargeInEvents = new Set();
 let pendingAlertBriefingForUser = null;
+
+// Voice-to-text handoff tracking
+let userDisconnected = false;
+let lastInteractionTime = 0;
+let lastUserMessage = '';
+const ACTIVE_CONVERSATION_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
 
 // ── Audio Queue (for streaming TTS) ──────────────────────────────────
 
@@ -187,10 +194,14 @@ client.once('ready', async () => {
   }
 });
 
-// Detect user joining voice channel
+// Detect user joining/leaving voice channel
 client.on('voiceStateUpdate', async (oldState, newState) => {
   if (newState.id !== ALLOWED_USERS[0]) return;
+  
+  // User joined
   if (!oldState.channelId && newState.channelId === currentVoiceChannelId) {
+    userDisconnected = false; // Reset disconnect flag on join
+    console.log(`👋 User joined voice channel`);
     setTimeout(async () => {
       if (hasPendingAlerts()) {
         await briefPendingAlerts(newState.id);
@@ -203,7 +214,73 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
       }
     }, 2000);
   }
+  
+  // User left
+  if (oldState.channelId === currentVoiceChannelId && !newState.channelId) {
+    console.log(`👋 User left voice channel`);
+    userDisconnected = true;
+    await handleVoiceDisconnect(newState.id);
+  }
 });
+
+// ── Voice-to-Text Handoff ────────────────────────────────────────────
+
+async function postToTextChannel(message) {
+  if (!TEXT_CHANNEL_ID) {
+    console.warn('⚠️  TEXT_CHANNEL_ID not configured, cannot post handoff');
+    return false;
+  }
+  
+  try {
+    const channel = client.channels.cache.get(TEXT_CHANNEL_ID);
+    if (!channel) {
+      console.error(`❌ Text channel ${TEXT_CHANNEL_ID} not found`);
+      return false;
+    }
+    await channel.send(message);
+    return true;
+  } catch (err) {
+    console.error(`❌ Failed to post to text channel: ${err.message}`);
+    return false;
+  }
+}
+
+async function handleVoiceDisconnect(userId) {
+  const timeSinceLastInteraction = Date.now() - lastInteractionTime;
+  const wasRecentlyActive = timeSinceLastInteraction < ACTIVE_CONVERSATION_WINDOW_MS;
+  
+  // Handle in-flight response (if processing)
+  if (isProcessing) {
+    console.log('📤 In-flight response detected — will handoff to text when ready');
+    // The handleSpeech function will check userDisconnected flag and route to text
+    return;
+  }
+  
+  // Handle queued speech
+  if (speechQueue.length > 0) {
+    console.log(`📤 Draining ${speechQueue.length} queued messages to text`);
+    const queue = [...speechQueue];
+    speechQueue = [];
+    
+    for (const { userId, totalBuffer } of queue) {
+      // Process each queued speech but skip TTS, post to text instead
+      // (This will be handled by the modified handleSpeech function)
+      await handleSpeech(userId, totalBuffer);
+    }
+    return;
+  }
+  
+  // Handle recent conversation handoff
+  if (wasRecentlyActive && lastUserMessage) {
+    console.log(`📤 Active conversation detected — posting handoff note to text`);
+    const handoffMsg = `🎙️ Voice session ended. Last topic: "${lastUserMessage}". Continuing in text.`;
+    await postToTextChannel(handoffMsg);
+    return;
+  }
+  
+  // Idle disconnect — silent exit
+  console.log(`🔇 Idle disconnect (${Math.round(timeSinceLastInteraction / 1000)}s since last interaction) — no handoff`);
+}
 
 async function joinChannel(voiceChannelId, options = {}) {
   const guild = client.guilds.cache.get(GUILD_ID);
@@ -338,6 +415,10 @@ async function handleSpeech(userId, audioBuffer) {
     
     const transcript = cleanedTranscript;
     
+    // Track interaction for handoff detection
+    lastInteractionTime = Date.now();
+    lastUserMessage = transcript.substring(0, 100); // Keep first 100 chars
+    
     // Wake word only (no actual question) — confirm and wait
     const trimmed = transcript.trim().replace(/[.,!?]/g, '');
     if (!trimmed || trimmed.length < 2) {
@@ -382,7 +463,16 @@ async function handleSpeech(userId, audioBuffer) {
     history.push({ role: 'assistant', content: response });
     while (history.length > 40) history.shift();
     
-    // 7. Synthesize and play (streaming or batch)
+    // 7. Route output: voice (TTS) or text (handoff)
+    if (userDisconnected) {
+      console.log('📤 User disconnected — posting response to text channel');
+      const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
+      await postToTextChannel(handoffMsg);
+      markBotResponse(userId);
+      return; // Skip TTS playback
+    }
+    
+    // 8. Synthesize and play (streaming or batch)
     if (STREAMING_TTS_ENABLED && response.length > 100) {
       const sentences = splitIntoSentences(response);
       audioQueue.clear();
