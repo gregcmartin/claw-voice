@@ -268,19 +268,19 @@ async function handleVoiceDisconnect(userId) {
   
   // Handle in-flight response (if processing)
   if (isProcessing) {
-    console.log('📤 In-flight response detected — will handoff via DM when ready');
-    // The handleSpeech function will check userDisconnected flag and route to DM
+    console.log('📤 In-flight response detected — will handoff to text channel when ready');
+    // The handleSpeech function will check userDisconnected flag and route to text
     return;
   }
   
   // Handle queued speech
   if (speechQueue.length > 0) {
-    console.log(`📤 Draining ${speechQueue.length} queued messages via DM`);
+    console.log(`📤 Draining ${speechQueue.length} queued messages to text channel`);
     const queue = [...speechQueue];
     speechQueue = [];
     
     for (const { userId, totalBuffer } of queue) {
-      // Process each queued speech but skip TTS, send via DM instead
+      // Process each queued speech but skip TTS, post to text instead
       // (This will be handled by the modified handleSpeech function)
       await handleSpeech(userId, totalBuffer);
     }
@@ -289,9 +289,9 @@ async function handleVoiceDisconnect(userId) {
   
   // Handle recent conversation handoff
   if (wasRecentlyActive && lastUserMessage) {
-    console.log(`📤 Active conversation detected — sending handoff DM`);
-    const handoffMsg = `🎙️ Voice session ended. Last topic: "${lastUserMessage}". Continuing via DM.`;
-    await sendDM(userId, handoffMsg);
+    console.log(`📤 Active conversation detected — posting handoff note to text channel`);
+    const handoffMsg = `🎙️ Voice session ended. Last topic: "${lastUserMessage}". Continuing in text.`;
+    await postToTextChannel(handoffMsg);
     return;
   }
   
@@ -480,11 +480,11 @@ async function handleSpeech(userId, audioBuffer) {
     history.push({ role: 'assistant', content: response });
     while (history.length > 40) history.shift();
     
-    // 7. Route output: voice (TTS) or DM (handoff)
+    // 7. Route output: voice (TTS) or text channel (handoff)
     if (userDisconnected) {
-      console.log('📤 User disconnected — sending response via DM');
+      console.log('📤 User disconnected — posting response to text channel');
       const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
-      await sendDM(userId, handoffMsg);
+      await postToTextChannel(handoffMsg);
       markBotResponse(userId);
       return; // Skip TTS playback
     }
