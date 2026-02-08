@@ -234,13 +234,17 @@ async function postToTextChannel(message) {
   try {
     const channel = client.channels.cache.get(TEXT_CHANNEL_ID);
     if (!channel) {
-      console.error(`❌ Text channel ${TEXT_CHANNEL_ID} not found`);
+      console.error(`❌ Text channel ${TEXT_CHANNEL_ID} not found in cache`);
       return false;
     }
+    
+    console.log(`📤 Posting to text channel ${TEXT_CHANNEL_ID}...`);
     await channel.send(message);
+    console.log(`✅ Posted to text channel successfully`);
     return true;
   } catch (err) {
     console.error(`❌ Failed to post to text channel: ${err.message}`);
+    console.error(`   Error code: ${err.code}, HTTP status: ${err.httpStatus}`);
     return false;
   }
 }
