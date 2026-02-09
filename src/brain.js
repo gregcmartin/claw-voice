@@ -4,6 +4,9 @@
  * Voice is just another input method. Same agent, same session,
  * same tools. We prepend a short [VOICE] tag so the agent knows
  * to format for speech (no markdown, concise). That's it.
+ * 
+ * Supports concurrent requests — each call gets its own AbortController
+ * chained to an external signal for cancellation.
  */
 
 import 'dotenv/config';
@@ -42,23 +45,10 @@ export function trimForVoice(text) {
 /**
  * Generate response via Clawdbot Gateway
  * 
- * Sends the voice transcript through the SAME agent that handles
- * all other channels. The agent has full tool access — web search,
- * email, calendar, Slack, MCP integrations, everything.
+ * Each call creates its own AbortController. If an external signal
+ * is provided (from the task manager), it chains to it for cancellation.
+ * No global state — supports concurrent requests.
  */
-// Active request controller — allows aborting in-flight brain calls
-let activeController = null;
-
-export function abortBrainRequest() {
-  if (activeController) {
-    activeController.abort();
-    activeController = null;
-    console.log('🛑 Brain request aborted');
-    return true;
-  }
-  return false;
-}
-
 export async function generateResponse(userMessage, history = [], signal) {
   const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
   
@@ -68,10 +58,12 @@ export async function generateResponse(userMessage, history = [], signal) {
   ];
   
   const controller = new AbortController();
-  activeController = controller;
   
-  // If an external signal is provided, chain it
+  // Chain external signal for cancellation
   if (signal) {
+    if (signal.aborted) {
+      return { text: '', aborted: true };
+    }
     signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
   
@@ -105,11 +97,9 @@ export async function generateResponse(userMessage, history = [], signal) {
     // Strip markdown for voice
     text = trimForVoice(text);
     
-    activeController = null;
     return { text };
     
   } catch (err) {
-    activeController = null;
     if (err.name === 'AbortError') {
       return { text: '', aborted: true };
     }

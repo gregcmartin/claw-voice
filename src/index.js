@@ -21,7 +21,7 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse, abortBrainRequest } from './brain.js';
+import { generateResponse } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -56,12 +56,16 @@ const player = createAudioPlayer({
 player.setMaxListeners(50);
 
 let isSpeaking = false;
-let isProcessing = false;
-let speechQueue = [];
 let currentConnection = null;
 let currentVoiceChannelId = null;
 const bargeInEvents = new Set();
 let pendingAlertBriefingForUser = null;
+
+// Async task management — concurrent background brain calls
+const activeTasks = new Map(); // taskId -> { controller, transcript, startTime }
+let taskIdCounter = 0;
+const responseQueue = []; // completed responses waiting to be spoken
+let isSpeakingResponse = false; // whether we're currently playing a response
 
 // Interrupt/stop command detection
 const INTERRUPT_PATTERNS = [
@@ -313,24 +317,9 @@ async function handleVoiceDisconnect(userId) {
   const timeSinceLastInteraction = Date.now() - lastInteractionTime;
   const wasRecentlyActive = timeSinceLastInteraction < ACTIVE_CONVERSATION_WINDOW_MS;
   
-  // Handle in-flight response (if processing)
-  if (isProcessing) {
-    console.log('📤 In-flight response detected — will handoff to text channel when ready');
-    // The handleSpeech function will check userDisconnected flag and route to text
-    return;
-  }
-  
-  // Handle queued speech
-  if (speechQueue.length > 0) {
-    console.log(`📤 Draining ${speechQueue.length} queued messages to text channel`);
-    const queue = [...speechQueue];
-    speechQueue = [];
-    
-    for (const { userId, totalBuffer } of queue) {
-      // Process each queued speech but skip TTS, post to text instead
-      // (This will be handled by the modified handleSpeech function)
-      await handleSpeech(userId, totalBuffer);
-    }
+  // Handle in-flight tasks — they'll detect userDisconnected and post to text
+  if (activeTasks.size > 0) {
+    console.log(`📤 ${activeTasks.size} tasks in flight — will handoff to text channel when ready`);
     return;
   }
   
@@ -431,44 +420,8 @@ async function joinChannel(voiceChannelId, options = {}) {
         
         if (durationMs < MIN_AUDIO_DURATION_MS) return;
         
-        if (isProcessing) {
-          // Always-transcribe: transcribe immediately so we can detect stop commands
-          try {
-            const wavPath = join(TMP_DIR, `interrupt_${userId}_${Date.now()}.wav`);
-            await savePcmAsWav(totalBuffer, wavPath);
-            const rawTranscript = await transcribeAudio(wavPath);
-            try { unlinkSync(wavPath); } catch {}
-            
-            if (rawTranscript && rawTranscript.trim().length > 0) {
-              console.log(`📝 (during processing) "${rawTranscript}"`);
-              
-              if (isInterruptCommand(rawTranscript)) {
-                console.log('⛔ Interrupt detected — aborting brain request');
-                const aborted = abortBrainRequest();
-                audioQueue.clear();
-                speechQueue = [];
-                isSpeaking = false;
-                
-                // Confirm the stop
-                const stopAudio = await synthesizeSpeech('Stopped.');
-                if (stopAudio) {
-                  await playAudio(stopAudio);
-                  try { unlinkSync(stopAudio); } catch {}
-                }
-                // isProcessing will be set to false by the finally block in handleSpeech
-                return;
-              }
-            }
-            
-            // Not a stop command — queue with pre-transcribed text
-            speechQueue.push({ userId, totalBuffer, transcript: rawTranscript });
-          } catch (err) {
-            console.error('Interrupt transcription failed:', err.message);
-            // Fallback: queue raw buffer
-            speechQueue.push({ userId, totalBuffer });
-          }
-          return;
-        }
+        // Fully async — every utterance goes straight to handleSpeech
+        // No blocking, no queueing. Multiple brain calls run concurrently.
         await handleSpeech(userId, totalBuffer);
       });
       
@@ -489,10 +442,15 @@ async function playGreeting() {
   }
 }
 
-// ── Speech Processing Pipeline ───────────────────────────────────────
+// ── Speech Processing Pipeline (Async — non-blocking) ────────────────
+//
+// Flow: User speaks → transcribe → dispatch background task → immediately ready
+//       Background task completes → queue response → TTS when speaker is free
+//
+// Quick commands (focus, wake word only, alerts) are handled synchronously.
+// Brain calls are fully async — multiple can run concurrently.
 
 async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
-  isProcessing = true;
   const startTime = Date.now();
   
   try {
@@ -519,53 +477,57 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     
     // Track interaction for handoff detection
     lastInteractionTime = Date.now();
-    lastUserMessage = transcript.substring(0, 100); // Keep first 100 chars
+    lastUserMessage = transcript.substring(0, 100);
     
-    // Focus command detection — "focus #general", "work in security", "clear focus"
+    // ── Interrupt/stop detection (cancels all active tasks) ──
+    if (isInterruptCommand(rawTranscript)) {
+      console.log(`⛔ Interrupt command: "${rawTranscript}"`);
+      cancelAllTasks();
+      const stopAudio = await synthesizeSpeech('Stopped.');
+      if (stopAudio) { await playAudio(stopAudio); try { unlinkSync(stopAudio); } catch {} }
+      return;
+    }
+    
+    // ── Quick commands (synchronous — no brain call needed) ──
+    
+    // Focus command
     const focusCmd = parseFocusCommand(transcript);
     if (focusCmd) {
       markBotResponse(userId);
-      isProcessing = false;
-      
       if (focusCmd.action === 'clear') {
         activeHandoffChannelId = null;
         console.log('🎯 Focus cleared — back to default channel');
         const audio = await synthesizeSpeech('Back to default channel.');
         if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-        return;
-      }
-      
-      const guild = client.guilds.cache.get(GUILD_ID);
-      const channel = guild ? findChannelByName(guild, focusCmd.channelName) : null;
-      
-      if (channel) {
-        activeHandoffChannelId = channel.id;
-        console.log(`🎯 Focus set to #${channel.name} (${channel.id})`);
-        const audio = await synthesizeSpeech(`Focused on ${channel.name}. If you disconnect, I'll post there.`);
-        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
       } else {
-        console.log(`🎯 Channel not found: ${focusCmd.channelName}`);
-        const audio = await synthesizeSpeech(`I couldn't find a channel named ${focusCmd.channelName}.`);
-        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+        const guild = client.guilds.cache.get(GUILD_ID);
+        const channel = guild ? findChannelByName(guild, focusCmd.channelName) : null;
+        if (channel) {
+          activeHandoffChannelId = channel.id;
+          console.log(`🎯 Focus set to #${channel.name} (${channel.id})`);
+          const audio = await synthesizeSpeech(`Focused on ${channel.name}. If you disconnect, I'll post there.`);
+          if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+        } else {
+          const audio = await synthesizeSpeech(`I couldn't find a channel named ${focusCmd.channelName}.`);
+          if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+        }
       }
       return;
     }
     
-    // Wake word only (no actual question) — confirm and wait
+    // Wake word only (no actual question)
     const trimmed = transcript.trim().replace(/[.,!?]/g, '');
     if (!trimmed || trimmed.length < 2) {
       markBotResponse(userId);
-      isProcessing = false;
       const chime = await synthesizeSpeech('Yes?');
       if (chime) { playAudio(chime).then(() => { try { unlinkSync(chime); } catch {} }).catch(() => {}); }
       return;
     }
     
-    // Alert briefing follow-up check
+    // Alert briefing follow-up
     let conv = conversations.get(userId);
     if (conv?.pendingAlertBriefing && transcript.match(/(yes|yeah|yep|sure|okay|ok|tell me|give me|run down|rundown|briefing|details)/i)) {
       markBotResponse(userId);
-      isProcessing = false;
       const alerts = conv.pendingAlertBriefing;
       let details = '';
       for (let i = 0; i < alerts.length; i++) {
@@ -579,96 +541,161 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
       return;
     }
     
-    // 3. Get conversation history
+    // ── Background brain call (async — non-blocking) ──
+    
     if (!conversations.has(userId)) conversations.set(userId, { history: [] });
     conv = conversations.get(userId);
-    const history = conv.history;
     
-    // 4. Send to gateway agent (non-streaming — reliable with tool calls)
-    console.log('🧠 Thinking...');
-    let response = '';
+    // Add user message to history immediately
+    conv.history.push({ role: 'user', content: transcript });
+    while (conv.history.length > 40) conv.history.shift();
     
-    try {
-      const result = await generateResponse(transcript, history);
-      if (result.aborted) {
-        console.log('🛑 Request was aborted — skipping response');
-        markBotResponse(userId);
-        return;
-      }
-      response = result.text;
-    } catch (err) {
-      console.error('Brain call failed:', err.message);
-      response = "I'm having trouble processing that. Try again?";
+    // Dispatch background task
+    const taskId = ++taskIdCounter;
+    const controller = new AbortController();
+    activeTasks.set(taskId, { controller, transcript, startTime, userId });
+    
+    console.log(`🚀 Task #${taskId} dispatched: "${transcript.substring(0, 60)}..." (${activeTasks.size} active)`);
+    
+    // Acknowledge with a brief confirmation so user knows we heard them
+    if (activeTasks.size > 1) {
+      const ackAudio = await synthesizeSpeech('On it.');
+      if (ackAudio) { audioQueue.add(ackAudio); }
     }
     
-    console.log(`💬 Response: "${(response || '').substring(0, 120)}..." (${Date.now() - startTime}ms)`);
+    // Fire and forget — brain call runs in background
+    processBrainTask(taskId, userId, transcript, [...conv.history], controller.signal)
+      .catch(err => console.error(`Task #${taskId} error:`, err.message));
     
-    // 5. Update local history
-    history.push({ role: 'user', content: transcript });
-    history.push({ role: 'assistant', content: response || '' });
-    while (history.length > 40) history.shift();
+  } catch (err) {
+    console.error('❌ Speech dispatch error:', err);
+  }
+}
+
+/**
+ * Background brain task — runs concurrently, queues result for TTS
+ */
+async function processBrainTask(taskId, userId, transcript, history, signal) {
+  const startTime = Date.now();
+  
+  try {
+    console.log(`🧠 Task #${taskId} thinking...`);
+    const result = await generateResponse(transcript, history, signal);
     
-    // 6. Handle disconnect — post to text channel instead of TTS
+    // Task was cancelled
+    if (result.aborted) {
+      console.log(`🛑 Task #${taskId} aborted`);
+      activeTasks.delete(taskId);
+      return;
+    }
+    
+    const response = result.text;
+    console.log(`💬 Task #${taskId} done (${Date.now() - startTime}ms): "${(response || '').substring(0, 80)}..."`);
+    
+    // Update conversation history with response
+    const conv = conversations.get(userId);
+    if (conv) {
+      conv.history.push({ role: 'assistant', content: response || '' });
+      while (conv.history.length > 40) conv.history.shift();
+    }
+    
+    // Remove from active tasks
+    activeTasks.delete(taskId);
+    
+    // Handle disconnect — post to text instead
     if (userDisconnected) {
-      console.log('📤 User disconnected — posting response to text channel');
+      console.log(`📤 Task #${taskId} — user disconnected, posting to text`);
       if (response) {
-        const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
-        await postToTextChannel(handoffMsg);
+        await postToTextChannel(`🎙️ **Voice handoff:**\n${response}`);
       }
       markBotResponse(userId);
       return;
     }
     
-    // 7. TTS sentence by sentence and play
+    // Queue response for TTS playback
     if (response) {
-      const sentences = splitIntoSentences(response);
-      audioQueue.clear();
-      
-      for (let i = 0; i < sentences.length; i++) {
-        if (userDisconnected) {
-          // User left mid-playback — dump rest to text
-          const remaining = sentences.slice(i).join(' ');
-          await postToTextChannel(`🎙️ **Voice handoff:**\n${remaining}`);
-          break;
-        }
-        try {
-          const audio = await synthesizeSpeech(sentences[i]);
-          if (audio) {
-            if (i === 0) console.log(`⏱️  First audio: ${Date.now() - startTime}ms`);
-            audioQueue.add(audio);
-          }
-        } catch (err) {
-          console.error(`TTS sentence ${i + 1} failed:`, err.message);
-        }
-      }
-      
-      // Wait for queue to drain
-      while (audioQueue.playing || audioQueue.queue.length > 0) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+      responseQueue.push({ taskId, userId, response, startTime });
+      drainResponseQueue();
     }
     
     markBotResponse(userId);
     
   } catch (err) {
-    console.error('❌ Speech processing error:', err);
-  } finally {
-    isProcessing = false;
-    
-    // Brief pending alerts on natural pause
-    if (pendingAlertBriefingForUser && hasPendingAlerts()) {
-      const uid = pendingAlertBriefingForUser;
-      pendingAlertBriefingForUser = null;
-      setImmediate(() => briefPendingAlerts(uid));
-      return;
-    }
-    
-    // Process queued speech (may have pre-transcribed text from always-transcribe)
-    if (speechQueue.length > 0) {
-      const next = speechQueue.shift();
-      setImmediate(() => handleSpeech(next.userId, next.totalBuffer, next.transcript));
+    activeTasks.delete(taskId);
+    if (err.name !== 'AbortError') {
+      console.error(`❌ Task #${taskId} failed:`, err.message);
+      responseQueue.push({ taskId, userId, response: "I had trouble with that one. Try again?", startTime });
+      drainResponseQueue();
     }
   }
+}
+
+/**
+ * Drain the response queue — speak completed responses one at a time
+ */
+async function drainResponseQueue() {
+  if (isSpeakingResponse || responseQueue.length === 0) return;
+  isSpeakingResponse = true;
+  
+  while (responseQueue.length > 0) {
+    const { taskId, userId, response, startTime } = responseQueue.shift();
+    
+    // If user disconnected while waiting, dump to text
+    if (userDisconnected) {
+      await postToTextChannel(`🎙️ **Voice handoff:**\n${response}`);
+      continue;
+    }
+    
+    const sentences = splitIntoSentences(response);
+    
+    for (let i = 0; i < sentences.length; i++) {
+      if (userDisconnected) {
+        const remaining = sentences.slice(i).join(' ');
+        await postToTextChannel(`🎙️ **Voice handoff:**\n${remaining}`);
+        break;
+      }
+      try {
+        const audio = await synthesizeSpeech(sentences[i]);
+        if (audio) {
+          if (i === 0) console.log(`⏱️  Task #${taskId} first audio: ${Date.now() - startTime}ms`);
+          audioQueue.add(audio);
+        }
+      } catch (err) {
+        console.error(`TTS sentence ${i + 1} failed:`, err.message);
+      }
+    }
+    
+    // Wait for this response's audio to finish before speaking next
+    while (audioQueue.playing || audioQueue.queue.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  
+  isSpeakingResponse = false;
+  
+  // Brief pending alerts on natural pause
+  if (pendingAlertBriefingForUser && hasPendingAlerts()) {
+    const uid = pendingAlertBriefingForUser;
+    pendingAlertBriefingForUser = null;
+    setImmediate(() => briefPendingAlerts(uid));
+  }
+}
+
+/**
+ * Cancel all active background tasks
+ */
+function cancelAllTasks() {
+  const count = activeTasks.size;
+  for (const [taskId, task] of activeTasks) {
+    task.controller.abort();
+    console.log(`🛑 Cancelled task #${taskId}`);
+  }
+  activeTasks.clear();
+  responseQueue.length = 0;
+  audioQueue.clear();
+  isSpeaking = false;
+  isSpeakingResponse = false;
+  console.log(`🛑 Cancelled ${count} active tasks, cleared all queues`);
 }
 
 // ── Audio Playback ───────────────────────────────────────────────────
@@ -764,14 +791,14 @@ function savePcmAsWav(pcmBuffer, outputPath) {
 // ── Graceful Shutdown ────────────────────────────────────────────────
 
 process.on('SIGINT', () => {
-  abortBrainRequest();
+  cancelAllTasks();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  abortBrainRequest();
+  cancelAllTasks();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);
