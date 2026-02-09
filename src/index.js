@@ -91,16 +91,11 @@ function isInterruptCommand(transcript) {
   return INTERRUPT_PATTERNS.some(p => p.test(clean));
 }
 
-// Model switching removed — gateway agent handles this via session_status tool
-
 // Voice-to-text handoff tracking
 let userDisconnected = false;
 let lastInteractionTime = 0;
 let lastUserMessage = '';
 const ACTIVE_CONVERSATION_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
-
-// Dynamic handoff channel — set via "focus #channel-name" voice command
-let activeHandoffChannelId = null;
 
 // ── Audio Queue (for streaming TTS) ──────────────────────────────────
 
@@ -207,29 +202,6 @@ async function generateDynamicGreeting() {
   }
 }
 
-// ── Dynamic Focus Channel ────────────────────────────────────────────
-
-function findChannelByName(guild, name) {
-  const cleanName = name.replace(/^#/, '').toLowerCase().trim();
-  const channel = guild.channels.cache.find(ch =>
-    ch.name.toLowerCase() === cleanName && ch.isTextBased() && !ch.isVoiceBased()
-  );
-  return channel || null;
-}
-
-// Focus command patterns — tolerant of Whisper punctuation (commas, periods, etc.)
-const FOCUS_PATTERN = /(?:focus\s+(?:on|in)|focus|work\s+(?:in|on|from)|switch\s+to|post\s+(?:in|to))[,.:;!?\s]+#?([a-z0-9_-]+(?:[\s-]+[a-z0-9_-]+)*)/i;
-const CLEAR_FOCUS_PATTERN = /(?:clear\s+focus|default\s+channel|reset\s+channel|unfocus)/i;
-
-function parseFocusCommand(transcript) {
-  // Strip trailing punctuation for cleaner matching
-  const clean = transcript.replace(/[.,!?;:]+$/g, '').trim();
-  if (CLEAR_FOCUS_PATTERN.test(clean)) return { action: 'clear' };
-  const match = clean.match(FOCUS_PATTERN);
-  if (match) return { action: 'focus', channelName: match[1].replace(/[.,!?;:]/g, '').replace(/\s+/g, '-').trim() };
-  return null;
-}
-
 // ── Main ─────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -259,7 +231,6 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   // User joined
   if (!oldState.channelId && newState.channelId === currentVoiceChannelId) {
     userDisconnected = false; // Reset disconnect flag on join
-    activeHandoffChannelId = null; // Reset focus on new session
     console.log(`👋 User joined voice channel`);
     // Quick "Jarvis online" on join — no waiting for AI-generated greeting
     setTimeout(async () => {
@@ -298,33 +269,24 @@ async function sendDM(userId, message) {
 }
 
 async function postToTextChannel(message) {
-  const targetChannelId = activeHandoffChannelId || TEXT_CHANNEL_ID;
-  
-  if (!targetChannelId) {
-    console.warn('⚠️  No handoff channel configured, skipping channel post');
+  if (!TEXT_CHANNEL_ID) {
+    console.warn('⚠️  No text channel configured, skipping channel post');
     return false;
   }
   
   try {
-    const channel = client.channels.cache.get(targetChannelId);
+    const channel = client.channels.cache.get(TEXT_CHANNEL_ID);
     if (!channel) {
-      console.error(`❌ Channel ${targetChannelId} not found in cache`);
-      // Fall back to default if dynamic channel fails
-      if (activeHandoffChannelId && TEXT_CHANNEL_ID) {
-        console.log(`↩️  Falling back to default channel ${TEXT_CHANNEL_ID}`);
-        const fallback = client.channels.cache.get(TEXT_CHANNEL_ID);
-        if (fallback) { await fallback.send(message); return true; }
-      }
+      console.error(`❌ Channel ${TEXT_CHANNEL_ID} not found in cache`);
       return false;
     }
     
-    console.log(`📤 Posting to ${channel.name} (${targetChannelId})${activeHandoffChannelId ? ' [focused]' : ''}...`);
+    console.log(`📤 Posting to ${channel.name} (${TEXT_CHANNEL_ID})...`);
     await channel.send(message);
     console.log(`✅ Posted to ${channel.name} successfully`);
     return true;
   } catch (err) {
     console.error(`❌ Failed to post to channel: ${err.message}`);
-    console.error(`   Error code: ${err.code}, HTTP status: ${err.httpStatus}`);
     return false;
   }
 }
@@ -512,6 +474,7 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     lastUserMessage = transcript.substring(0, 100);
     
     // ── Interrupt/stop detection (cancels all active tasks) ──
+    // This MUST stay local — it needs to kill in-flight audio/tasks immediately
     if (isInterruptCommand(rawTranscript)) {
       console.log(`⛔ Interrupt command: "${rawTranscript}"`);
       cancelAllTasks();
@@ -520,56 +483,12 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
       return;
     }
     
-    // ── Quick commands (synchronous — no brain call needed) ──
-    
-    // Focus command
-    const focusCmd = parseFocusCommand(transcript);
-    if (focusCmd) {
-      markBotResponse(userId);
-      if (focusCmd.action === 'clear') {
-        activeHandoffChannelId = null;
-        console.log('🎯 Focus cleared — back to default channel');
-        const audio = await synthesizeSpeech('Back to default channel.');
-        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-      } else {
-        const guild = client.guilds.cache.get(GUILD_ID);
-        const channel = guild ? findChannelByName(guild, focusCmd.channelName) : null;
-        if (channel) {
-          activeHandoffChannelId = channel.id;
-          console.log(`🎯 Focus set to #${channel.name} (${channel.id})`);
-          const audio = await synthesizeSpeech(`Focused on ${channel.name}. If you disconnect, I'll post there.`);
-          if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-        } else {
-          const audio = await synthesizeSpeech(`I couldn't find a channel named ${focusCmd.channelName}.`);
-          if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-        }
-      }
-      return;
-    }
-    
-    // Wake word only (no actual question)
+    // Wake word only (no actual question) — local chime, no gateway round-trip
     const trimmed = transcript.trim().replace(/[.,!?]/g, '');
     if (!trimmed || trimmed.length < 2) {
       markBotResponse(userId);
       const chime = await synthesizeSpeech('Yes?');
       if (chime) { playAudio(chime).then(() => { try { unlinkSync(chime); } catch {} }).catch(() => {}); }
-      return;
-    }
-    
-    // Alert briefing follow-up
-    let conv = conversations.get(userId);
-    if (conv?.pendingAlertBriefing && transcript.match(/(yes|yeah|yep|sure|okay|ok|tell me|give me|run down|rundown|briefing|details)/i)) {
-      markBotResponse(userId);
-      const alerts = conv.pendingAlertBriefing;
-      let details = '';
-      for (let i = 0; i < alerts.length; i++) {
-        if (alerts.length > 1) details += `Alert ${i + 1}. `;
-        details += (alerts[i].fullDetails || alerts[i].message) + '. ';
-      }
-      const audio = await synthesizeSpeech(details);
-      if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-      clearAlerts();
-      delete conv.pendingAlertBriefing;
       return;
     }
     
