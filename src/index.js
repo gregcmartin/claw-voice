@@ -72,24 +72,7 @@ const ACTIVE_CONVERSATION_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
 // Dynamic handoff channel — set via "focus #channel-name" voice command
 let activeHandoffChannelId = null;
 
-// ── Instant Ack (pre-generated audio files) ──────────────────────────
-
-const ACK_DIR = join(__dirname, '..', 'assets');
-const ACK_FILES = [];
-function loadAckFiles() {
-  for (let i = 1; i <= 10; i++) {
-    const p = join(ACK_DIR, `ack-${i}.mp3`);
-    if (existsSync(p)) ACK_FILES.push(p);
-  }
-  console.log(`🔊 Loaded ${ACK_FILES.length} ack audio files`);
-}
-let ackIndex = 0;
-function getNextAck() {
-  if (ACK_FILES.length === 0) return null;
-  const file = ACK_FILES[ackIndex % ACK_FILES.length];
-  ackIndex++;
-  return file;
-}
+// (ack audio removed)
 
 // (tool detection patterns removed — using non-streaming for all queries)
 
@@ -229,7 +212,6 @@ client.once('ready', async () => {
   console.log(`🤖 Jarvis Voice Bot online as ${client.user.tag}`);
   console.log(`📡 Guild: ${GUILD_ID} | Voice: ${VOICE_CHANNEL_ID}`);
   
-  loadAckFiles();
   initAlertWebhook(client, GUILD_ID, ALLOWED_USERS, scheduleBriefingOnPause);
   startAlertWebhook();
   
