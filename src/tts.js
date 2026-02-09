@@ -139,9 +139,18 @@ function synthesizeEdgeStream(text) {
       read() {}
     });
     
+    // Timeout fallback — stored so we can clear on success
+    const timeoutId = setTimeout(() => {
+      if (!started) {
+        proc.kill('SIGKILL');
+        reject(new Error('Edge TTS stream timeout'));
+      }
+    }, 5000);
+    
     proc.stdout.on('data', (chunk) => {
       if (!started) {
         started = true;
+        clearTimeout(timeoutId);
         resolve(stream);
       }
       stream.push(chunk);
@@ -152,24 +161,18 @@ function synthesizeEdgeStream(text) {
     });
     
     proc.on('error', (err) => {
+      clearTimeout(timeoutId);
       if (!started) {
         reject(new Error(`Edge TTS stream failed: ${err.message}`));
       }
     });
     
     proc.on('exit', (code) => {
+      clearTimeout(timeoutId);
       if (!started && code !== 0) {
         reject(new Error(`Edge TTS exited with code ${code}`));
       }
     });
-    
-    // Timeout fallback
-    setTimeout(() => {
-      if (!started) {
-        proc.kill();
-        reject(new Error('Edge TTS stream timeout'));
-      }
-    }, 5000);
   });
 }
 

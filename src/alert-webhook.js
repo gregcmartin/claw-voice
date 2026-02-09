@@ -8,7 +8,7 @@ import express from 'express';
 import { queueAlert } from './alert-queue.js';
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10kb' }));
 
 const WEBHOOK_PORT = process.env.ALERT_WEBHOOK_PORT || 3335;
 const WEBHOOK_TOKEN = process.env.ALERT_WEBHOOK_TOKEN || 'change-me';

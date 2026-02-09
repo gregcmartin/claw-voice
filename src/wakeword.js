@@ -16,6 +16,16 @@ const CONVERSATION_WINDOW_MS = parseInt(process.env.CONVERSATION_WINDOW_MS || '6
 // Track when the bot last spoke to each user for conversation window
 const lastBotResponseTime = new Map();
 
+// Prune expired entries every 5 minutes to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, time] of lastBotResponseTime) {
+    if (now - time > CONVERSATION_WINDOW_MS * 2) {
+      lastBotResponseTime.delete(userId);
+    }
+  }
+}, 5 * 60 * 1000);
+
 /**
  * Check if transcript contains a wake word
  * @param {string} transcript - The transcribed text

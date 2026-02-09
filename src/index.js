@@ -17,7 +17,7 @@ import {
   EndBehaviorType,
   NoSubscriberBehavior,
 } from '@discordjs/voice';
-import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { createWriteStream, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
@@ -42,7 +42,19 @@ const TEXT_CHANNEL_ID = process.env.DISCORD_TEXT_CHANNEL_ID;
 const ALLOWED_USERS = (process.env.ALLOWED_USERS || '').split(',').map(s => s.trim());
 
 // Conversation history per user (local backup — gateway session is primary)
-const conversations = new Map(); // userId -> { history: [] }
+const conversations = new Map(); // userId -> { history: [], lastActive: timestamp }
+const CONVERSATION_TTL_MS = 30 * 60 * 1000; // Prune inactive conversations after 30 min
+
+function pruneConversations() {
+  const now = Date.now();
+  for (const [userId, conv] of conversations) {
+    if (now - (conv.lastActive || 0) > CONVERSATION_TTL_MS) {
+      conversations.delete(userId);
+    }
+  }
+}
+// Run pruning every 5 minutes
+setInterval(pruneConversations, 5 * 60 * 1000);
 
 // Voice activity tracking
 const userSpeaking = new Map();
@@ -53,12 +65,14 @@ const MIN_AUDIO_DURATION_MS = 300;
 const player = createAudioPlayer({
   behaviors: { noSubscriber: NoSubscriberBehavior.Play },
 });
-player.setMaxListeners(50);
+// Listener cleanup in playAudio/finish() prevents accumulation — modest limit is safe
+player.setMaxListeners(20);
 
 let isSpeaking = false;
 let currentConnection = null;
 let currentVoiceChannelId = null;
 const bargeInEvents = new Set();
+const bargeInTimers = new Map(); // Module-scope so reconnects can clear old timers
 let pendingAlertBriefingForUser = null;
 
 // Async task management — concurrent background brain calls
@@ -117,6 +131,8 @@ class AudioQueue {
     isSpeaking = true;
     const { audioSource } = this.queue.shift();
     try { await playAudio(audioSource); } catch (err) { console.error('Queue playback error:', err.message); }
+    // Clean up TTS temp file after playback
+    try { unlinkSync(audioSource); } catch {}
     setImmediate(() => this.playNext());
   }
 }
@@ -353,23 +369,28 @@ async function joinChannel(voiceChannelId, options = {}) {
   currentVoiceChannelId = voiceChannelId;
   setCurrentVoiceChannelId(voiceChannelId);
   
-  // Reconnect on disconnect
-  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+  // Reconnect on disconnect — named handler + once() to prevent listener accumulation
+  const handleDisconnect = async () => {
     try {
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
       ]);
+      // Re-attach disconnect handler after successful reconnect
+      connection.once(VoiceConnectionStatus.Disconnected, handleDisconnect);
     } catch {
       connection.destroy();
       console.log('⚠️  Disconnected, rejoining...');
       setTimeout(() => joinChannel(voiceChannelId), 5000);
     }
-  });
+  };
+  connection.once(VoiceConnectionStatus.Disconnected, handleDisconnect);
   
   // Listen to incoming audio
   const receiver = connection.receiver;
-  const bargeInTimers = new Map();
+  // Clear any stale barge-in timers from previous connection
+  for (const [uid, timer] of bargeInTimers) { clearTimeout(timer); }
+  bargeInTimers.clear();
   const BARGE_IN_THRESHOLD_MS = 600;
   
   receiver.speaking.on('end', (userId) => {
@@ -411,6 +432,15 @@ async function joinChannel(voiceChannelId, options = {}) {
       
       decoder.on('data', (chunk) => chunks.push(chunk));
       
+      // Clean up userSpeaking on error so future audio isn't blocked
+      audioStream.once('error', (err) => {
+        console.error(`Audio stream error for ${userId}:`, err.message);
+        userSpeaking.delete(userId);
+        decoder.destroy();
+      });
+      
+      decoder.once('error', () => {}); // Suppress unhandled error on destroy
+      
       audioStream.once('end', async () => {
         userSpeaking.delete(userId);
         const totalBuffer = Buffer.concat(chunks);
@@ -450,6 +480,7 @@ async function playGreeting() {
 
 async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
   const startTime = Date.now();
+  let wavPath = null;
   
   try {
     // 1. Transcribe (skip if already transcribed during queue)
@@ -458,10 +489,11 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
       rawTranscript = preTranscribed;
       console.log(`📝 (pre-transcribed) "${rawTranscript}"`);
     } else {
-      const wavPath = join(TMP_DIR, `speech_${userId}_${Date.now()}.wav`);
+      wavPath = join(TMP_DIR, `speech_${userId}_${Date.now()}.wav`);
       await savePcmAsWav(audioBuffer, wavPath);
       rawTranscript = await transcribeAudio(wavPath);
       try { unlinkSync(wavPath); } catch {}
+      wavPath = null; // Cleaned up successfully
     }
     
     if (!rawTranscript || rawTranscript.trim().length === 0) return;
@@ -541,8 +573,9 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     
     // ── Background brain call (async — non-blocking) ──
     
-    if (!conversations.has(userId)) conversations.set(userId, { history: [] });
+    if (!conversations.has(userId)) conversations.set(userId, { history: [], lastActive: Date.now() });
     conv = conversations.get(userId);
+    conv.lastActive = Date.now();
     
     // Add user message to history immediately
     conv.history.push({ role: 'user', content: transcript });
@@ -567,6 +600,9 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     
   } catch (err) {
     console.error('❌ Speech dispatch error:', err);
+  } finally {
+    // Clean up WAV file if it wasn't already deleted
+    if (wavPath) { try { unlinkSync(wavPath); } catch {} }
   }
 }
 
@@ -613,7 +649,6 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
     // Task was cancelled
     if (result.aborted) {
       console.log(`🛑 Task #${taskId} aborted`);
-      activeTasks.delete(taskId);
       return;
     }
     
@@ -626,8 +661,6 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
       while (conv.history.length > 40) conv.history.shift();
     }
     
-    // Remove from active tasks
-    activeTasks.delete(taskId);
     markBotResponse(userId);
     
     // Brief pending alerts on natural pause
@@ -638,7 +671,6 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
     }
     
   } catch (err) {
-    activeTasks.delete(taskId);
     if (err.name !== 'AbortError') {
       console.error(`❌ Task #${taskId} failed:`, err.message);
       try {
@@ -646,6 +678,9 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
         if (audio) audioQueue.add(audio);
       } catch {}
     }
+  } finally {
+    // Guarantee task cleanup regardless of success/failure/abort
+    activeTasks.delete(taskId);
   }
 }
 
@@ -670,9 +705,10 @@ async function playAudio(audioPath) {
   isSpeaking = true;
   const playStart = Date.now();
   
-  const { createReadStream: crs } = await import('fs');
-  const fileBuffer = readFileSync(audioPath);
-  const estimatedDurationMs = Math.max(2000, (fileBuffer.length / 1024 / 5) * 1000);
+  const { createReadStream: crs, statSync: fstatSync } = await import('fs');
+  // Use statSync for file size instead of reading entire file into memory
+  const fileStat = fstatSync(audioPath);
+  const estimatedDurationMs = Math.max(2000, (fileStat.size / 1024 / 5) * 1000);
   
   const resource = createAudioResource(crs(audioPath), { inlineVolume: true });
   resource.volume.setVolume(1.0);
@@ -685,8 +721,9 @@ async function playAudio(audioPath) {
     const finish = (reason) => {
       if (resolved) return;
       resolved = true;
-      if (onIdle) player.off(AudioPlayerStatus.Idle, onIdle);
-      if (onError) player.off('error', onError);
+      // Remove ALL listeners we attached — prevents accumulation
+      player.removeListener(AudioPlayerStatus.Idle, onIdle);
+      player.removeListener('error', onError);
       if (timeoutId) clearTimeout(timeoutId);
       if (checkInterval) clearInterval(checkInterval);
       isSpeaking = false;
@@ -713,7 +750,8 @@ async function playAudio(audioPath) {
     onError = () => finish('error');
     player.once('error', onError);
     
-    timeoutId = setTimeout(() => finish('timeout'), Math.min(estimatedDurationMs * 2, 600000));
+    // Cap timeout at 60s instead of 600s to prevent long-lived intervals
+    timeoutId = setTimeout(() => finish('timeout'), Math.min(estimatedDurationMs * 2, 60000));
     checkInterval = setInterval(() => {
       if (Date.now() - playStart >= estimatedDurationMs && player.state.status === AudioPlayerStatus.Idle) {
         finish('idle-polled');

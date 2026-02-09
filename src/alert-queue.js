@@ -3,6 +3,8 @@
  */
 
 const pendingAlerts = [];
+const MAX_ALERTS = 50;
+const ALERT_TTL_MS = 4 * 60 * 60 * 1000; // Expire alerts older than 4 hours
 
 export function queueAlert(alert) {
   // alert: { 
@@ -12,11 +14,26 @@ export function queueAlert(alert) {
   //   fullDetails: 'Full context (optional)',
   //   source: 'security-monitor'|'cron'|'system'
   // }
+  
+  // Prune expired alerts first
+  const now = Date.now();
+  for (let i = pendingAlerts.length - 1; i >= 0; i--) {
+    if (now - pendingAlerts[i].timestamp > ALERT_TTL_MS) {
+      pendingAlerts.splice(i, 1);
+    }
+  }
+  
   pendingAlerts.push({
     ...alert,
-    timestamp: alert.timestamp || Date.now(),
+    timestamp: alert.timestamp || now,
     priority: alert.priority || 'normal',
   });
+  
+  // Cap total alerts — drop oldest non-urgent first
+  while (pendingAlerts.length > MAX_ALERTS) {
+    const normalIdx = pendingAlerts.findIndex(a => a.priority !== 'urgent');
+    pendingAlerts.splice(normalIdx >= 0 ? normalIdx : 0, 1);
+  }
   
   // Sort by priority (urgent first), then timestamp (oldest first)
   pendingAlerts.sort((a, b) => {

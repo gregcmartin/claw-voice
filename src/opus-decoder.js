@@ -37,7 +37,13 @@ export class OpusDecoder extends Transform {
   }
   
   _flush(callback) {
-    this.decoder.end();
+    try { this.decoder.end(); } catch {}
     callback();
+  }
+  
+  _destroy(err, callback) {
+    // Clean up native libopus resources even if stream is destroyed without flush
+    try { this.decoder.destroy(); } catch {}
+    callback(err);
   }
 }
