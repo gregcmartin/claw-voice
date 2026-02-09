@@ -21,7 +21,7 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse } from './brain.js';
+import { generateResponse, generateResponseStreaming } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences, STREAMING_TTS_ENABLED } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -534,55 +534,81 @@ async function handleSpeech(userId, audioBuffer) {
     conv = conversations.get(userId);
     const history = conv.history;
     
-    // 5. Send to gateway agent — same brain as text chat
-    console.log('🧠 Thinking...');
-    const { text: response } = await generateResponse(transcript, history);
+    // 5. Send to gateway agent — streaming for fast time-to-first-audio
+    console.log('🧠 Thinking (streaming)...');
     
-    console.log(`💬 Response: "${response.substring(0, 120)}..." (${Date.now() - startTime}ms)`);
+    let response = '';
+    let sentenceCount = 0;
+    let firstSentenceTime = 0;
+    let disconnectedDuringStream = false;
+    
+    try {
+      audioQueue.clear();
+      
+      const streamResult = await generateResponseStreaming(transcript, history, async (sentence) => {
+        sentenceCount++;
+        
+        // Check if user disconnected mid-stream
+        if (userDisconnected && !disconnectedDuringStream) {
+          disconnectedDuringStream = true;
+          audioQueue.clear();
+          console.log('📤 User disconnected mid-stream — switching to text accumulation');
+        }
+        
+        if (disconnectedDuringStream) {
+          // Don't TTS — just accumulate (fullText handles this)
+          return;
+        }
+        
+        // TTS this sentence and queue it
+        try {
+          const audio = await synthesizeSpeech(sentence);
+          if (audio) {
+            if (sentenceCount === 1) {
+              firstSentenceTime = Date.now() - startTime;
+              console.log(`⏱️  First audio: ${firstSentenceTime}ms`);
+            }
+            audioQueue.add(audio);
+          }
+        } catch (err) {
+          console.error(`TTS sentence ${sentenceCount} failed:`, err.message);
+        }
+      });
+      
+      response = streamResult.text || streamResult.fullText || '';
+      
+    } catch (streamErr) {
+      // Fallback to non-streaming if streaming fails
+      console.warn('⚠️  Streaming failed, falling back to non-streaming:', streamErr.message);
+      const fallbackResult = await generateResponse(transcript, history);
+      response = fallbackResult.text;
+      
+      // Play fallback response normally
+      if (!userDisconnected) {
+        const audio = await synthesizeSpeech(response);
+        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+      }
+    }
+    
+    console.log(`💬 Response (${sentenceCount} sentences): "${response.substring(0, 120)}..." (${Date.now() - startTime}ms)`);
     
     // 6. Update local history
     history.push({ role: 'user', content: transcript });
     history.push({ role: 'assistant', content: response });
     while (history.length > 40) history.shift();
     
-    // 7. Route output: voice (TTS) or text channel (handoff)
-    if (userDisconnected) {
+    // 7. Handle disconnect during stream — post accumulated text to channel
+    if (disconnectedDuringStream || (userDisconnected && sentenceCount === 0)) {
       console.log('📤 User disconnected — posting response to text channel');
       const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
       await postToTextChannel(handoffMsg);
       markBotResponse(userId);
-      return; // Skip TTS playback
+      return;
     }
     
-    // 8. Synthesize and play (streaming or batch)
-    if (STREAMING_TTS_ENABLED && response.length > 100) {
-      const sentences = splitIntoSentences(response);
-      audioQueue.clear();
-      
-      // Play first sentence immediately
-      const firstAudio = await synthesizeSpeech(sentences[0]);
-      if (firstAudio) {
-        console.log(`⏱️  First audio: ${Date.now() - startTime}ms`);
-        audioQueue.add(firstAudio);
-      }
-      
-      // Queue remaining sentences
-      for (let i = 1; i < sentences.length; i++) {
-        try {
-          const audio = await synthesizeSpeech(sentences[i]);
-          if (audio) audioQueue.add(audio);
-        } catch (err) {
-          console.error(`TTS sentence ${i + 1} failed:`, err.message);
-        }
-      }
-      
-      // Wait for queue to drain
-      while (audioQueue.playing || audioQueue.queue.length > 0) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-    } else {
-      const audio = await synthesizeSpeech(response);
-      if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+    // 8. Wait for audio queue to drain (streaming sentences already queued)
+    while (audioQueue.playing || audioQueue.queue.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
     
     markBotResponse(userId);

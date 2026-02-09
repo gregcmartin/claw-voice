@@ -46,6 +46,128 @@ function trimForVoice(text) {
  * all other channels. The agent has full tool access — web search,
  * email, calendar, Slack, MCP integrations, everything.
  */
+/**
+ * Generate streaming response via Clawdbot Gateway (SSE)
+ * 
+ * Streams tokens as they arrive, fires onSentence() callback
+ * whenever a complete sentence is buffered. This lets TTS start
+ * on the first sentence while the rest is still generating.
+ * 
+ * Returns the full accumulated response text when the stream ends.
+ */
+export async function generateResponseStreaming(userMessage, history = [], onSentence) {
+  const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
+  
+  const messages = [
+    ...history.slice(-6).map(m => ({ role: m.role, content: m.content })),
+    { role: 'user', content: voiceMessage },
+  ];
+  
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${GATEWAY_TOKEN}`,
+  };
+  
+  const controller = new AbortController();
+  
+  try {
+    const res = await fetch(COMPLETIONS_URL, {
+      method: 'POST',
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: 'anthropic/claude-opus-4-6',
+        messages,
+        max_tokens: 8192,
+        stream: true,
+        user: SESSION_USER,
+      }),
+    });
+    
+    if (!res.ok) {
+      const body = await res.text();
+      console.error('Gateway streaming error:', res.status, body);
+      throw new Error(`Gateway ${res.status}: ${body}`);
+    }
+    
+    let fullText = '';
+    let sentenceBuffer = '';
+    
+    // Sentence boundary: period/exclamation/question followed by space and uppercase,
+    // or end-of-stream flush
+    const SENTENCE_BOUNDARY = /([.!?])\s+(?=[A-Z])/;
+    const MIN_SENTENCE_LENGTH = 20;
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let partial = '';
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      partial += decoder.decode(value, { stream: true });
+      
+      // Process complete SSE lines
+      const lines = partial.split('\n');
+      partial = lines.pop() || ''; // Keep incomplete line
+      
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        
+        try {
+          const parsed = JSON.parse(data);
+          const token = parsed.choices?.[0]?.delta?.content;
+          if (!token) continue;
+          
+          fullText += token;
+          sentenceBuffer += token;
+          
+          // Check for sentence boundaries in the buffer
+          let match;
+          while ((match = SENTENCE_BOUNDARY.exec(sentenceBuffer)) !== null) {
+            const sentenceEnd = match.index + match[1].length;
+            const sentence = sentenceBuffer.slice(0, sentenceEnd).trim();
+            sentenceBuffer = sentenceBuffer.slice(sentenceEnd).trimStart();
+            
+            if (sentence.length >= MIN_SENTENCE_LENGTH) {
+              const cleanSentence = trimForVoice(sentence);
+              if (cleanSentence) {
+                await onSentence(cleanSentence);
+              }
+            } else {
+              // Too short — prepend back to buffer
+              sentenceBuffer = sentence + ' ' + sentenceBuffer;
+            }
+          }
+        } catch {
+          // Skip malformed JSON chunks (tool-use, etc.)
+        }
+      }
+    }
+    
+    // Flush remaining buffer
+    if (sentenceBuffer.trim().length > 0) {
+      const cleanRemaining = trimForVoice(sentenceBuffer.trim());
+      if (cleanRemaining) {
+        await onSentence(cleanRemaining);
+      }
+    }
+    
+    return { text: trimForVoice(fullText), fullText, controller };
+    
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log('Stream aborted (barge-in or disconnect)');
+      return { text: '', fullText: '', controller };
+    }
+    console.error('Gateway streaming failed:', err.message);
+    throw err;
+  }
+}
+
 export async function generateResponse(userMessage, history = []) {
   const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
   
