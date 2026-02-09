@@ -134,6 +134,13 @@ export async function generateResponseStreaming(userMessage, history = [], signa
           buffer += content;
           fullText += content;
           
+          // Strip [[tts:...]] tags from the streaming buffer before sentence detection
+          // These tags span across sentences so strip them from the raw buffer
+          buffer = buffer.replace(/\[\[tts:[^\]]*\]\]/g, '');
+          buffer = buffer.replace(/\[\[\/tts:text\]\]/g, '');
+          buffer = buffer.replace(/\[\[tts:text\]\]/g, '');
+          buffer = buffer.replace(/\[\[reply_to[^\]]*\]\]/g, '');
+          
           // Check for complete sentences and emit them
           let match;
           while ((match = buffer.match(SENTENCE_END))) {
