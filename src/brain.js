@@ -68,7 +68,7 @@ export async function generateResponse(userMessage, history = []) {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: 'anthropic/claude-haiku-4-5',  // Haiku for fast voice responses
+        model: 'anthropic/claude-opus-4-6',  // Opus for voice
         messages,
         max_tokens: 8192,
         user: SESSION_USER,
