@@ -27,7 +27,11 @@ const VOICE_TAG = `[VOICE] This is a voice request. Use tools and take actions e
  */
 export function trimForVoice(text) {
   let clean = text
-    .replace(/\*\*([^*]+)\*\*/g, '$1')      // bold
+    .replace(/\[\[tts:([^\]]*)\]\]/g, '$1')  // [[tts:text]] → text
+    .replace(/\[\[\/tts:text\]\]/g, '')      // [[/tts:text]] closing tag
+    .replace(/\[\[tts:text\]\]/g, '')        // [[tts:text]] opening tag
+    .replace(/\[\[reply_to[^\]]*\]\]/g, '')  // [[reply_to:...]] tags
+    .replace(/\*\*([^*]+)\*\*/g, '$1')       // bold
     .replace(/\*([^*]+)\*/g, '$1')           // italic
     .replace(/#{1,6}\s+/g, '')               // headers
     .replace(/```[\s\S]*?```/g, '')          // code blocks
