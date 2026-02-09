@@ -21,7 +21,7 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse, generateResponseStreaming } from './brain.js';
+import { generateResponse, generateResponseStreaming, trimForVoice } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -583,6 +583,10 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
     
     // Stream response — TTS each sentence as it arrives
     const result = await generateResponseStreaming(transcript, history, signal, async (sentence) => {
+      // Final safety strip — catch any tags that survived the stream buffer
+      sentence = trimForVoice(sentence);
+      if (!sentence || sentence.length < 2) return;
+      
       fullResponse += sentence + ' ';
       
       if (!firstAudioLogged) {
