@@ -259,15 +259,10 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     userDisconnected = false; // Reset disconnect flag on join
     activeHandoffChannelId = null; // Reset focus on new session
     console.log(`👋 User joined voice channel`);
+    // Only brief pending alerts on join — no greeting chime
     setTimeout(async () => {
       if (hasPendingAlerts()) {
         await briefPendingAlerts(newState.id);
-      } else {
-        try {
-          const greeting = await generateDynamicGreeting();
-          const audio = await synthesizeSpeech(greeting);
-          if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-        } catch {}
       }
     }, 2000);
   }
