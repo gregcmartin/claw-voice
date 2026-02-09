@@ -69,6 +69,9 @@ let lastInteractionTime = 0;
 let lastUserMessage = '';
 const ACTIVE_CONVERSATION_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
 
+// Dynamic handoff channel — set via "focus #channel-name" voice command
+let activeHandoffChannelId = null;
+
 // ── Audio Queue (for streaming TTS) ──────────────────────────────────
 
 class AudioQueue {
@@ -172,6 +175,27 @@ async function generateDynamicGreeting() {
   }
 }
 
+// ── Dynamic Focus Channel ────────────────────────────────────────────
+
+function findChannelByName(guild, name) {
+  const cleanName = name.replace(/^#/, '').toLowerCase().trim();
+  const channel = guild.channels.cache.find(ch =>
+    ch.name.toLowerCase() === cleanName && ch.isTextBased() && !ch.isVoiceBased()
+  );
+  return channel || null;
+}
+
+// Focus command patterns
+const FOCUS_PATTERN = /(?:focus|work\s+(?:in|on|from)|switch\s+to|post\s+(?:in|to))\s+#?([a-z0-9_-]+(?:\s+[a-z0-9_-]+)*)/i;
+const CLEAR_FOCUS_PATTERN = /(?:clear\s+focus|default\s+channel|reset\s+channel|unfocus)/i;
+
+function parseFocusCommand(transcript) {
+  if (CLEAR_FOCUS_PATTERN.test(transcript)) return { action: 'clear' };
+  const match = transcript.match(FOCUS_PATTERN);
+  if (match) return { action: 'focus', channelName: match[1].replace(/\s+/g, '-') };
+  return null;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 const client = new Client({
@@ -201,6 +225,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   // User joined
   if (!oldState.channelId && newState.channelId === currentVoiceChannelId) {
     userDisconnected = false; // Reset disconnect flag on join
+    activeHandoffChannelId = null; // Reset focus on new session
     console.log(`👋 User joined voice channel`);
     setTimeout(async () => {
       if (hasPendingAlerts()) {
@@ -239,24 +264,32 @@ async function sendDM(userId, message) {
 }
 
 async function postToTextChannel(message) {
-  if (!TEXT_CHANNEL_ID) {
-    console.warn('⚠️  TEXT_CHANNEL_ID not configured, skipping channel post');
+  const targetChannelId = activeHandoffChannelId || TEXT_CHANNEL_ID;
+  
+  if (!targetChannelId) {
+    console.warn('⚠️  No handoff channel configured, skipping channel post');
     return false;
   }
   
   try {
-    const channel = client.channels.cache.get(TEXT_CHANNEL_ID);
+    const channel = client.channels.cache.get(targetChannelId);
     if (!channel) {
-      console.error(`❌ Text channel ${TEXT_CHANNEL_ID} not found in cache`);
+      console.error(`❌ Channel ${targetChannelId} not found in cache`);
+      // Fall back to default if dynamic channel fails
+      if (activeHandoffChannelId && TEXT_CHANNEL_ID) {
+        console.log(`↩️  Falling back to default channel ${TEXT_CHANNEL_ID}`);
+        const fallback = client.channels.cache.get(TEXT_CHANNEL_ID);
+        if (fallback) { await fallback.send(message); return true; }
+      }
       return false;
     }
     
-    console.log(`📤 Posting to text channel ${TEXT_CHANNEL_ID}...`);
+    console.log(`📤 Posting to ${channel.name} (${targetChannelId})${activeHandoffChannelId ? ' [focused]' : ''}...`);
     await channel.send(message);
-    console.log(`✅ Posted to text channel successfully`);
+    console.log(`✅ Posted to ${channel.name} successfully`);
     return true;
   } catch (err) {
-    console.error(`❌ Failed to post to text channel: ${err.message}`);
+    console.error(`❌ Failed to post to channel: ${err.message}`);
     console.error(`   Error code: ${err.code}, HTTP status: ${err.httpStatus}`);
     return false;
   }
@@ -435,6 +468,36 @@ async function handleSpeech(userId, audioBuffer) {
     // Track interaction for handoff detection
     lastInteractionTime = Date.now();
     lastUserMessage = transcript.substring(0, 100); // Keep first 100 chars
+    
+    // Focus command detection — "focus #general", "work in security", "clear focus"
+    const focusCmd = parseFocusCommand(transcript);
+    if (focusCmd) {
+      markBotResponse(userId);
+      isProcessing = false;
+      
+      if (focusCmd.action === 'clear') {
+        activeHandoffChannelId = null;
+        console.log('🎯 Focus cleared — back to default channel');
+        const audio = await synthesizeSpeech('Back to default channel.');
+        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+        return;
+      }
+      
+      const guild = client.guilds.cache.get(GUILD_ID);
+      const channel = guild ? findChannelByName(guild, focusCmd.channelName) : null;
+      
+      if (channel) {
+        activeHandoffChannelId = channel.id;
+        console.log(`🎯 Focus set to #${channel.name} (${channel.id})`);
+        const audio = await synthesizeSpeech(`Focused on ${channel.name}. If you disconnect, I'll post there.`);
+        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+      } else {
+        console.log(`🎯 Channel not found: ${focusCmd.channelName}`);
+        const audio = await synthesizeSpeech(`I couldn't find a channel named ${focusCmd.channelName}.`);
+        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+      }
+      return;
+    }
     
     // Wake word only (no actual question) — confirm and wait
     const trimmed = transcript.trim().replace(/[.,!?]/g, '');
