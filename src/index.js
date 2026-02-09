@@ -64,8 +64,6 @@ let pendingAlertBriefingForUser = null;
 // Async task management — concurrent background brain calls
 const activeTasks = new Map(); // taskId -> { controller, transcript, startTime }
 let taskIdCounter = 0;
-const responseQueue = []; // completed responses waiting to be spoken
-let isSpeakingResponse = false; // whether we're currently playing a response
 
 // Interrupt/stop command detection
 const INTERRUPT_PATTERNS = [
@@ -612,10 +610,10 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
       return;
     }
     
-    // Queue response for TTS playback
+    // Speak response immediately — feed sentences directly into audio queue
+    // No waiting for other tasks. First to finish, first to speak.
     if (response) {
-      responseQueue.push({ taskId, userId, response, startTime });
-      drainResponseQueue();
+      await speakResponse(taskId, userId, response, startTime);
     }
     
     markBotResponse(userId);
@@ -624,57 +622,43 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
     activeTasks.delete(taskId);
     if (err.name !== 'AbortError') {
       console.error(`❌ Task #${taskId} failed:`, err.message);
-      responseQueue.push({ taskId, userId, response: "I had trouble with that one. Try again?", startTime });
-      drainResponseQueue();
+      await speakResponse(taskId, userId, "I had trouble with that one. Try again?", Date.now());
     }
   }
 }
 
 /**
- * Drain the response queue — speak completed responses one at a time
+ * Speak a response immediately — feeds sentences into the shared audio queue.
+ * Multiple tasks can call this concurrently; the audio queue handles ordering.
+ * Each response gets a brief pause before it to separate from prior audio.
  */
-async function drainResponseQueue() {
-  if (isSpeakingResponse || responseQueue.length === 0) return;
-  isSpeakingResponse = true;
+async function speakResponse(taskId, userId, response, startTime) {
+  if (userDisconnected) {
+    await postToTextChannel(`🎙️ **Voice handoff:**\n${response}`);
+    return;
+  }
   
-  while (responseQueue.length > 0) {
-    const { taskId, userId, response, startTime } = responseQueue.shift();
-    
-    // If user disconnected while waiting, dump to text
+  const sentences = splitIntoSentences(response);
+  
+  for (let i = 0; i < sentences.length; i++) {
     if (userDisconnected) {
-      await postToTextChannel(`🎙️ **Voice handoff:**\n${response}`);
-      continue;
+      const remaining = sentences.slice(i).join(' ');
+      await postToTextChannel(`🎙️ **Voice handoff:**\n${remaining}`);
+      break;
     }
-    
-    const sentences = splitIntoSentences(response);
-    
-    for (let i = 0; i < sentences.length; i++) {
-      if (userDisconnected) {
-        const remaining = sentences.slice(i).join(' ');
-        await postToTextChannel(`🎙️ **Voice handoff:**\n${remaining}`);
-        break;
+    try {
+      const audio = await synthesizeSpeech(sentences[i]);
+      if (audio) {
+        if (i === 0) console.log(`⏱️  Task #${taskId} first audio: ${Date.now() - startTime}ms`);
+        audioQueue.add(audio);
       }
-      try {
-        const audio = await synthesizeSpeech(sentences[i]);
-        if (audio) {
-          if (i === 0) console.log(`⏱️  Task #${taskId} first audio: ${Date.now() - startTime}ms`);
-          audioQueue.add(audio);
-        }
-      } catch (err) {
-        console.error(`TTS sentence ${i + 1} failed:`, err.message);
-      }
-    }
-    
-    // Wait for this response's audio to finish before speaking next
-    while (audioQueue.playing || audioQueue.queue.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    } catch (err) {
+      console.error(`TTS sentence ${i + 1} failed:`, err.message);
     }
   }
   
-  isSpeakingResponse = false;
-  
   // Brief pending alerts on natural pause
-  if (pendingAlertBriefingForUser && hasPendingAlerts()) {
+  if (pendingAlertBriefingForUser && hasPendingAlerts() && activeTasks.size === 0) {
     const uid = pendingAlertBriefingForUser;
     pendingAlertBriefingForUser = null;
     setImmediate(() => briefPendingAlerts(uid));
@@ -691,10 +675,8 @@ function cancelAllTasks() {
     console.log(`🛑 Cancelled task #${taskId}`);
   }
   activeTasks.clear();
-  responseQueue.length = 0;
   audioQueue.clear();
   isSpeaking = false;
-  isSpeakingResponse = false;
   console.log(`🛑 Cancelled ${count} active tasks, cleared all queues`);
 }
 
