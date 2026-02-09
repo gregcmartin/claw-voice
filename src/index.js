@@ -21,7 +21,7 @@ import { createWriteStream, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse, generateResponseStreaming, trimForVoice } from './brain.js';
+import { generateResponse, generateResponseStreaming, trimForVoice, setModel, getCurrentModel } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -89,6 +89,21 @@ const INTERRUPT_PATTERNS = [
 function isInterruptCommand(transcript) {
   const clean = transcript.trim().replace(/[.,!?;:]+$/g, '');
   return INTERRUPT_PATTERNS.some(p => p.test(clean));
+}
+
+// Model switching patterns
+const MODE_SWITCH_PATTERNS = [
+  { pattern: /(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:basic|haiku)\s*(?:mode)?/i, mode: 'basic' },
+  { pattern: /(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:default|sonnet|normal)\s*(?:mode)?/i, mode: 'default' },
+  { pattern: /(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:advanced|opus)\s*(?:mode)?/i, mode: 'advanced' },
+];
+
+function detectModeSwitch(transcript) {
+  const clean = transcript.trim().replace(/[.,!?;:]+$/g, '');
+  for (const { pattern, mode } of MODE_SWITCH_PATTERNS) {
+    if (pattern.test(clean)) return mode;
+  }
+  return null;
 }
 
 // Voice-to-text handoff tracking
@@ -519,6 +534,16 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     }
     
     // ── Quick commands (synchronous — no brain call needed) ──
+    
+    // Model/mode switching
+    const modeSwitch = detectModeSwitch(rawTranscript);
+    if (modeSwitch) {
+      const { modeName } = setModel(modeSwitch);
+      markBotResponse(userId);
+      const audio = await synthesizeSpeech(`Switched to ${modeName}.`);
+      if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+      return;
+    }
     
     // Focus command
     const focusCmd = parseFocusCommand(transcript);
