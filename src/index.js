@@ -21,7 +21,7 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse, generateResponseStreaming, abortActiveStream } from './brain.js';
+import { generateResponse } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences, STREAMING_TTS_ENABLED } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -91,16 +91,7 @@ function getNextAck() {
   return file;
 }
 
-// ── Smart Fallback: detect queries likely to trigger tool use ────────
-
-const TOOL_LIKELY_PATTERNS = [
-  /\b(search|look up|find out|research|investigate|google)\b/i,
-  /\b(check|read|open|look at|pull up)\s+(my |the |that )?(email|calendar|slack|linear|notion|inbox)/i,
-  /\b(what'?s|what is)\s+(happening|going on|the status|new)\b/i,
-  /\b(reverse engineer|decompil|disassembl|analyz)\b/i,
-  /\b(download|install|run|execute|deploy)\b/i,
-  /\b(scan|audit|monitor|track)\b/i,
-];
+// (tool detection patterns removed — using non-streaming for all queries)
 
 // ── Audio Queue (for streaming TTS) ──────────────────────────────────
 
@@ -571,112 +562,28 @@ async function handleSpeech(userId, audioBuffer) {
       playAudio(ackFile).catch(() => {}); // Fire and forget, don't block
     }
     
-    // 6. Decide: streaming vs non-streaming based on query type
-    const likelyNeedsTools = TOOL_LIKELY_PATTERNS.some(p => p.test(transcript));
-    
+    // 6. Send to gateway agent (non-streaming — reliable with tool calls)
+    console.log('🧠 Thinking...');
     let response = '';
-    let sentenceCount = 0;
-    let firstSentenceTime = 0;
-    let disconnectedDuringStream = false;
+    let disconnectedDuringResponse = false;
     
-    if (likelyNeedsTools) {
-      // Non-streaming path — tools dominate latency, streaming just hangs
-      console.log('🧠 Thinking (non-streaming, tool query detected)...');
-      
-      try {
-        const result = await generateResponse(transcript, history);
-        response = result.text;
-        
-        if (userDisconnected) {
-          // Handle disconnect during non-streaming wait
-        } else if (response) {
-          // TTS the response sentence by sentence
-          const sentences = splitIntoSentences(response);
-          sentenceCount = sentences.length;
-          audioQueue.clear();
-          
-          for (let i = 0; i < sentences.length; i++) {
-            if (userDisconnected) { disconnectedDuringStream = true; break; }
-            try {
-              const audio = await synthesizeSpeech(sentences[i]);
-              if (audio) {
-                if (i === 0) {
-                  firstSentenceTime = Date.now() - startTime;
-                  console.log(`⏱️  First audio: ${firstSentenceTime}ms`);
-                }
-                audioQueue.add(audio);
-              }
-            } catch (err) {
-              console.error(`TTS sentence ${i + 1} failed:`, err.message);
-            }
-          }
-        }
-      } catch (err) {
-        console.error('Non-streaming brain call failed:', err.message);
-        response = "I'm having trouble processing that. Try again?";
-        const audio = await synthesizeSpeech(response);
-        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-      }
-      
-    } else {
-      // Streaming path — conversational response, tokens flow fast
-      console.log('🧠 Thinking (streaming)...');
-      
-      try {
-        audioQueue.clear();
-        
-        const streamResult = await generateResponseStreaming(transcript, history, async (sentence) => {
-          sentenceCount++;
-          
-          if (userDisconnected && !disconnectedDuringStream) {
-            disconnectedDuringStream = true;
-            audioQueue.clear();
-            console.log('📤 User disconnected mid-stream — switching to text accumulation');
-          }
-          
-          if (disconnectedDuringStream) return;
-          
-          try {
-            const audio = await synthesizeSpeech(sentence);
-            if (audio) {
-              if (sentenceCount === 1) {
-                firstSentenceTime = Date.now() - startTime;
-                console.log(`⏱️  First audio: ${firstSentenceTime}ms`);
-              }
-              audioQueue.add(audio);
-            }
-          } catch (err) {
-            console.error(`TTS sentence ${sentenceCount} failed:`, err.message);
-          }
-        });
-        
-        response = streamResult.text || streamResult.fullText || '';
-        
-      } catch (streamErr) {
-        console.warn('⚠️  Streaming failed, falling back to non-streaming:', streamErr.message);
-        const fallbackResult = await generateResponse(transcript, history);
-        response = fallbackResult.text;
-        
-        if (!userDisconnected && response) {
-          const sentences = splitIntoSentences(response);
-          sentenceCount = sentences.length;
-          for (const s of sentences) {
-            const audio = await synthesizeSpeech(s);
-            if (audio) audioQueue.add(audio);
-          }
-        }
-      }
+    try {
+      const result = await generateResponse(transcript, history);
+      response = result.text;
+    } catch (err) {
+      console.error('Brain call failed:', err.message);
+      response = "I'm having trouble processing that. Try again?";
     }
     
-    console.log(`💬 Response (${sentenceCount} sentences): "${(response || '').substring(0, 120)}..." (${Date.now() - startTime}ms)`);
+    console.log(`💬 Response: "${(response || '').substring(0, 120)}..." (${Date.now() - startTime}ms)`);
     
     // 7. Update local history
     history.push({ role: 'user', content: transcript });
     history.push({ role: 'assistant', content: response || '' });
     while (history.length > 40) history.shift();
     
-    // 8. Handle disconnect — post accumulated text to channel
-    if (disconnectedDuringStream || (userDisconnected && sentenceCount === 0)) {
+    // 8. Handle disconnect — post to text channel instead of TTS
+    if (userDisconnected) {
       console.log('📤 User disconnected — posting response to text channel');
       if (response) {
         const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
@@ -686,9 +593,33 @@ async function handleSpeech(userId, audioBuffer) {
       return;
     }
     
-    // 9. Wait for audio queue to drain
-    while (audioQueue.playing || audioQueue.queue.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    // 9. TTS sentence by sentence and play
+    if (response) {
+      const sentences = splitIntoSentences(response);
+      audioQueue.clear();
+      
+      for (let i = 0; i < sentences.length; i++) {
+        if (userDisconnected) {
+          // User left mid-playback — dump rest to text
+          const remaining = sentences.slice(i).join(' ');
+          await postToTextChannel(`🎙️ **Voice handoff:**\n${remaining}`);
+          break;
+        }
+        try {
+          const audio = await synthesizeSpeech(sentences[i]);
+          if (audio) {
+            if (i === 0) console.log(`⏱️  First audio: ${Date.now() - startTime}ms`);
+            audioQueue.add(audio);
+          }
+        } catch (err) {
+          console.error(`TTS sentence ${i + 1} failed:`, err.message);
+        }
+      }
+      
+      // Wait for queue to drain
+      while (audioQueue.playing || audioQueue.queue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     }
     
     markBotResponse(userId);
@@ -807,14 +738,12 @@ function savePcmAsWav(pcmBuffer, outputPath) {
 // ── Graceful Shutdown ────────────────────────────────────────────────
 
 process.on('SIGINT', () => {
-  abortActiveStream();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  abortActiveStream();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);

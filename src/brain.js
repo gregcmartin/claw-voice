@@ -21,7 +21,7 @@ const VOICE_TAG = `[VOICE] Respond for spoken TTS output. No markdown, no format
 /**
  * Trim response for voice - strip any markdown that slipped through
  */
-function trimForVoice(text) {
+export function trimForVoice(text) {
   let clean = text
     .replace(/\*\*([^*]+)\*\*/g, '$1')      // bold
     .replace(/\*([^*]+)\*/g, '$1')           // italic
@@ -46,156 +46,6 @@ function trimForVoice(text) {
  * all other channels. The agent has full tool access — web search,
  * email, calendar, Slack, MCP integrations, everything.
  */
-/**
- * Generate streaming response via Clawdbot Gateway (SSE)
- * 
- * Streams tokens as they arrive, fires onSentence() callback
- * whenever a complete sentence is buffered. This lets TTS start
- * on the first sentence while the rest is still generating.
- * 
- * Returns the full accumulated response text when the stream ends.
- */
-// Track active stream controller for graceful shutdown
-let activeStreamController = null;
-export function abortActiveStream() {
-  if (activeStreamController) {
-    activeStreamController.abort();
-    activeStreamController = null;
-  }
-}
-
-// Max time to wait with no tokens before aborting stream (tool calls can be long)
-const STREAM_INACTIVITY_TIMEOUT_MS = 90_000; // 90 seconds
-
-export async function generateResponseStreaming(userMessage, history = [], onSentence) {
-  const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
-  
-  const messages = [
-    ...history.slice(-6).map(m => ({ role: m.role, content: m.content })),
-    { role: 'user', content: voiceMessage },
-  ];
-  
-  const headers = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${GATEWAY_TOKEN}`,
-  };
-  
-  const controller = new AbortController();
-  activeStreamController = controller;
-  
-  try {
-    const res = await fetch(COMPLETIONS_URL, {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: 'anthropic/claude-opus-4-6',
-        messages,
-        max_tokens: 8192,
-        stream: true,
-        user: SESSION_USER,
-      }),
-    });
-    
-    if (!res.ok) {
-      const body = await res.text();
-      console.error('Gateway streaming error:', res.status, body);
-      throw new Error(`Gateway ${res.status}: ${body}`);
-    }
-    
-    let fullText = '';
-    let sentenceBuffer = '';
-    
-    const SENTENCE_BOUNDARY = /([.!?])\s+(?=[A-Z])/;
-    const MIN_SENTENCE_LENGTH = 20;
-    
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let partial = '';
-    let lastTokenTime = Date.now();
-    
-    // Inactivity watchdog — aborts if no data arrives for too long
-    let inactivityTimer = null;
-    const resetInactivityTimer = () => {
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-      lastTokenTime = Date.now();
-      inactivityTimer = setTimeout(() => {
-        console.warn(`⚠️  Stream inactivity timeout (${STREAM_INACTIVITY_TIMEOUT_MS / 1000}s) — aborting`);
-        controller.abort();
-      }, STREAM_INACTIVITY_TIMEOUT_MS);
-    };
-    resetInactivityTimer();
-    
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        resetInactivityTimer(); // Got data, reset watchdog
-        partial += decoder.decode(value, { stream: true });
-        
-        const lines = partial.split('\n');
-        partial = lines.pop() || '';
-        
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
-          
-          try {
-            const parsed = JSON.parse(data);
-            const token = parsed.choices?.[0]?.delta?.content;
-            if (!token) continue;
-            
-            fullText += token;
-            sentenceBuffer += token;
-            
-            let match;
-            while ((match = SENTENCE_BOUNDARY.exec(sentenceBuffer)) !== null) {
-              const sentenceEnd = match.index + match[1].length;
-              const sentence = sentenceBuffer.slice(0, sentenceEnd).trim();
-              sentenceBuffer = sentenceBuffer.slice(sentenceEnd).trimStart();
-              
-              if (sentence.length >= MIN_SENTENCE_LENGTH) {
-                const cleanSentence = trimForVoice(sentence);
-                if (cleanSentence) {
-                  await onSentence(cleanSentence);
-                }
-              } else {
-                sentenceBuffer = sentence + ' ' + sentenceBuffer;
-              }
-            }
-          } catch {
-            // Skip malformed JSON chunks (tool-use, etc.)
-          }
-        }
-      }
-    } finally {
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-    }
-    
-    // Flush remaining buffer
-    if (sentenceBuffer.trim().length > 0) {
-      const cleanRemaining = trimForVoice(sentenceBuffer.trim());
-      if (cleanRemaining) {
-        await onSentence(cleanRemaining);
-      }
-    }
-    
-    activeStreamController = null;
-    return { text: trimForVoice(fullText), fullText, controller };
-    
-  } catch (err) {
-    activeStreamController = null;
-    if (err.name === 'AbortError') {
-      console.log('Stream aborted (barge-in, disconnect, or timeout)');
-      return { text: '', fullText: '', controller };
-    }
-    console.error('Gateway streaming failed:', err.message);
-    throw err;
-  }
-}
-
 export async function generateResponse(userMessage, history = []) {
   const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
   
@@ -214,7 +64,7 @@ export async function generateResponse(userMessage, history = []) {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: 'anthropic/claude-opus-4-6',  // Opus for voice
+        model: 'anthropic/claude-opus-4-6',
         messages,
         max_tokens: 8192,
         user: SESSION_USER,
