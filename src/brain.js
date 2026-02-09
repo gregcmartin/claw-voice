@@ -33,10 +33,14 @@ const SENTENCE_END = /[.!?]+(?:\s|$)/;
  */
 export function trimForVoice(text) {
   let clean = text
-    .replace(/\[\[tts:([^\]]*)\]\]/g, '$1')  // [[tts:text]] → text
-    .replace(/\[\[\/tts:text\]\]/g, '')      // [[/tts:text]] closing tag
-    .replace(/\[\[tts:text\]\]/g, '')        // [[tts:text]] opening tag
-    .replace(/\[\[reply_to[^\]]*\]\]/g, '')  // [[reply_to:...]] tags
+    .replace(/\[\[tts:[^\]]*\]\]/g, '')      // [[tts:anything]] complete tag → remove
+    .replace(/\[\[\/tts:[^\]]*\]\]/g, '')    // [[/tts:anything]] closing tag → remove
+    .replace(/\[\[reply_to[^\]]*\]\]/g, '')  // [[reply_to:...]] tags → remove
+    .replace(/\[\[tts:[^\]]*$/g, '')         // [[tts:partial (unclosed) → remove
+    .replace(/\[\[\/tts:[^\]]*$/g, '')       // [[/tts:partial (unclosed) → remove
+    .replace(/\[\[(?:tts|reply_to)[^\]]*$/g, '') // any unclosed [[ tag at end
+    .replace(/^\]\]/g, '')                   // orphaned ]] at start → remove
+    .replace(/\]\]\s*/g, '')                 // orphaned ]] anywhere → remove
     .replace(/\*\*([^*]+)\*\*/g, '$1')       // bold
     .replace(/\*([^*]+)\*/g, '$1')           // italic
     .replace(/#{1,6}\s+/g, '')               // headers
