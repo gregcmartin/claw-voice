@@ -556,13 +556,7 @@ async function handleSpeech(userId, audioBuffer) {
     conv = conversations.get(userId);
     const history = conv.history;
     
-    // 5. Instant ack — play a short audio so user knows they were heard
-    const ackFile = getNextAck();
-    if (ackFile) {
-      playAudio(ackFile).catch(() => {}); // Fire and forget, don't block
-    }
-    
-    // 6. Send to gateway agent (non-streaming — reliable with tool calls)
+    // 5. Send to gateway agent (non-streaming — reliable with tool calls)
     console.log('🧠 Thinking...');
     let response = '';
     let disconnectedDuringResponse = false;
