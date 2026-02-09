@@ -21,8 +21,8 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse } from './brain.js';
-import { synthesizeSpeech, splitIntoSentences, STREAMING_TTS_ENABLED } from './tts.js';
+import { generateResponse, abortBrainRequest } from './brain.js';
+import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
 import { queueAlert, hasPendingAlerts, getPendingAlerts, clearAlerts } from './alert-queue.js';
@@ -63,6 +63,18 @@ let currentVoiceChannelId = null;
 const bargeInEvents = new Set();
 let pendingAlertBriefingForUser = null;
 
+// Interrupt/stop command detection
+const INTERRUPT_PATTERNS = [
+  /^(jarvis\s*[,.]?\s*)?(stop|cancel|abort|shut up|be quiet|enough|nevermind|never mind|hold on|wait)\.?$/i,
+  /^(jarvis\s*[,.]?\s*)?(stop|cancel)\s+(that|it|talking|speaking|please|now)\.?$/i,
+  /^(jarvis\s*[,.]?\s*)?that's\s+(enough|ok|okay|fine)\.?$/i,
+];
+
+function isInterruptCommand(transcript) {
+  const clean = transcript.trim().replace(/[.,!?;:]+$/g, '');
+  return INTERRUPT_PATTERNS.some(p => p.test(clean));
+}
+
 // Voice-to-text handoff tracking
 let userDisconnected = false;
 let lastInteractionTime = 0;
@@ -71,10 +83,6 @@ const ACTIVE_CONVERSATION_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
 
 // Dynamic handoff channel — set via "focus #channel-name" voice command
 let activeHandoffChannelId = null;
-
-// (ack audio removed)
-
-// (tool detection patterns removed — using non-streaming for all queries)
 
 // ── Audio Queue (for streaming TTS) ──────────────────────────────────
 
@@ -424,7 +432,41 @@ async function joinChannel(voiceChannelId, options = {}) {
         if (durationMs < MIN_AUDIO_DURATION_MS) return;
         
         if (isProcessing) {
-          speechQueue.push({ userId, totalBuffer });
+          // Always-transcribe: transcribe immediately so we can detect stop commands
+          try {
+            const wavPath = join(TMP_DIR, `interrupt_${userId}_${Date.now()}.wav`);
+            await savePcmAsWav(totalBuffer, wavPath);
+            const rawTranscript = await transcribeAudio(wavPath);
+            try { unlinkSync(wavPath); } catch {}
+            
+            if (rawTranscript && rawTranscript.trim().length > 0) {
+              console.log(`📝 (during processing) "${rawTranscript}"`);
+              
+              if (isInterruptCommand(rawTranscript)) {
+                console.log('⛔ Interrupt detected — aborting brain request');
+                const aborted = abortBrainRequest();
+                audioQueue.clear();
+                speechQueue = [];
+                isSpeaking = false;
+                
+                // Confirm the stop
+                const stopAudio = await synthesizeSpeech('Stopped.');
+                if (stopAudio) {
+                  await playAudio(stopAudio);
+                  try { unlinkSync(stopAudio); } catch {}
+                }
+                // isProcessing will be set to false by the finally block in handleSpeech
+                return;
+              }
+            }
+            
+            // Not a stop command — queue with pre-transcribed text
+            speechQueue.push({ userId, totalBuffer, transcript: rawTranscript });
+          } catch (err) {
+            console.error('Interrupt transcription failed:', err.message);
+            // Fallback: queue raw buffer
+            speechQueue.push({ userId, totalBuffer });
+          }
           return;
         }
         await handleSpeech(userId, totalBuffer);
@@ -449,23 +491,27 @@ async function playGreeting() {
 
 // ── Speech Processing Pipeline ───────────────────────────────────────
 
-async function handleSpeech(userId, audioBuffer) {
+async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
   isProcessing = true;
   const startTime = Date.now();
   
   try {
-    // 1. Save PCM to WAV
-    const wavPath = join(TMP_DIR, `speech_${userId}_${Date.now()}.wav`);
-    await savePcmAsWav(audioBuffer, wavPath);
-    
-    // 2. Transcribe
-    const rawTranscript = await transcribeAudio(wavPath);
-    try { unlinkSync(wavPath); } catch {}
+    // 1. Transcribe (skip if already transcribed during queue)
+    let rawTranscript;
+    if (preTranscribed) {
+      rawTranscript = preTranscribed;
+      console.log(`📝 (pre-transcribed) "${rawTranscript}"`);
+    } else {
+      const wavPath = join(TMP_DIR, `speech_${userId}_${Date.now()}.wav`);
+      await savePcmAsWav(audioBuffer, wavPath);
+      rawTranscript = await transcribeAudio(wavPath);
+      try { unlinkSync(wavPath); } catch {}
+    }
     
     if (!rawTranscript || rawTranscript.trim().length === 0) return;
     console.log(`📝 "${rawTranscript}" (${Date.now() - startTime}ms)`);
     
-    // 3. Wake word check
+    // 2. Wake word check
     const { detected, cleanedTranscript } = checkWakeWord(rawTranscript, userId);
     if (!detected) return;
     
@@ -533,18 +579,22 @@ async function handleSpeech(userId, audioBuffer) {
       return;
     }
     
-    // 4. Get conversation history
+    // 3. Get conversation history
     if (!conversations.has(userId)) conversations.set(userId, { history: [] });
     conv = conversations.get(userId);
     const history = conv.history;
     
-    // 5. Send to gateway agent (non-streaming — reliable with tool calls)
+    // 4. Send to gateway agent (non-streaming — reliable with tool calls)
     console.log('🧠 Thinking...');
     let response = '';
-    let disconnectedDuringResponse = false;
     
     try {
       const result = await generateResponse(transcript, history);
+      if (result.aborted) {
+        console.log('🛑 Request was aborted — skipping response');
+        markBotResponse(userId);
+        return;
+      }
       response = result.text;
     } catch (err) {
       console.error('Brain call failed:', err.message);
@@ -553,12 +603,12 @@ async function handleSpeech(userId, audioBuffer) {
     
     console.log(`💬 Response: "${(response || '').substring(0, 120)}..." (${Date.now() - startTime}ms)`);
     
-    // 7. Update local history
+    // 5. Update local history
     history.push({ role: 'user', content: transcript });
     history.push({ role: 'assistant', content: response || '' });
     while (history.length > 40) history.shift();
     
-    // 8. Handle disconnect — post to text channel instead of TTS
+    // 6. Handle disconnect — post to text channel instead of TTS
     if (userDisconnected) {
       console.log('📤 User disconnected — posting response to text channel');
       if (response) {
@@ -569,7 +619,7 @@ async function handleSpeech(userId, audioBuffer) {
       return;
     }
     
-    // 9. TTS sentence by sentence and play
+    // 7. TTS sentence by sentence and play
     if (response) {
       const sentences = splitIntoSentences(response);
       audioQueue.clear();
@@ -613,10 +663,10 @@ async function handleSpeech(userId, audioBuffer) {
       return;
     }
     
-    // Process queued speech
+    // Process queued speech (may have pre-transcribed text from always-transcribe)
     if (speechQueue.length > 0) {
       const next = speechQueue.shift();
-      setImmediate(() => handleSpeech(next.userId, next.totalBuffer));
+      setImmediate(() => handleSpeech(next.userId, next.totalBuffer, next.transcript));
     }
   }
 }
@@ -714,12 +764,14 @@ function savePcmAsWav(pcmBuffer, outputPath) {
 // ── Graceful Shutdown ────────────────────────────────────────────────
 
 process.on('SIGINT', () => {
+  abortBrainRequest();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+  abortBrainRequest();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);

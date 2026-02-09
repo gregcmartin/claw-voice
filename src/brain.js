@@ -46,13 +46,34 @@ export function trimForVoice(text) {
  * all other channels. The agent has full tool access — web search,
  * email, calendar, Slack, MCP integrations, everything.
  */
-export async function generateResponse(userMessage, history = []) {
+// Active request controller — allows aborting in-flight brain calls
+let activeController = null;
+
+export function abortBrainRequest() {
+  if (activeController) {
+    activeController.abort();
+    activeController = null;
+    console.log('🛑 Brain request aborted');
+    return true;
+  }
+  return false;
+}
+
+export async function generateResponse(userMessage, history = [], signal) {
   const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
   
   const messages = [
     ...history.slice(-6).map(m => ({ role: m.role, content: m.content })),
     { role: 'user', content: voiceMessage },
   ];
+  
+  const controller = new AbortController();
+  activeController = controller;
+  
+  // If an external signal is provided, chain it
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
   
   try {
     const headers = {
@@ -63,6 +84,7 @@ export async function generateResponse(userMessage, history = []) {
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers,
+      signal: controller.signal,
       body: JSON.stringify({
         model: 'anthropic/claude-opus-4-6',
         messages,
@@ -83,9 +105,14 @@ export async function generateResponse(userMessage, history = []) {
     // Strip markdown for voice
     text = trimForVoice(text);
     
+    activeController = null;
     return { text };
     
   } catch (err) {
+    activeController = null;
+    if (err.name === 'AbortError') {
+      return { text: '', aborted: true };
+    }
     console.error('Gateway failed:', err.message);
     return { text: "I'm having trouble connecting right now. Try again?" };
   }
