@@ -512,7 +512,7 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     // ── Background brain call (async — non-blocking) ──
     
     if (!conversations.has(userId)) conversations.set(userId, { history: [], lastActive: Date.now() });
-    conv = conversations.get(userId);
+    const conv = conversations.get(userId);
     conv.lastActive = Date.now();
     
     // Add user message to history immediately
