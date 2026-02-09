@@ -28,6 +28,9 @@ const VOICE_TAG = `[VOICE] This is a voice request. Use tools and take actions e
 // Sentence boundary pattern — split on . ! ? followed by space or end
 const SENTENCE_END = /[.!?]+(?:\s|$)/;
 
+// Patterns that are agent signals, not speech — suppress from TTS
+const AGENT_SIGNAL_PATTERN = /^\s*(NO_REPLY|HEARTBEAT_OK|NO)\s*[.!?]*\s*$/i;
+
 /**
  * Trim response for voice - strip any markdown that slipped through
  */
@@ -110,6 +113,7 @@ export async function generateResponseStreaming(userMessage, history = [], signa
     // Parse SSE stream, accumulate text, emit sentences
     let fullText = '';
     let buffer = '';
+    let firstSentenceEmitted = false;
     
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -159,10 +163,12 @@ export async function generateResponseStreaming(userMessage, history = [], signa
             
             // Clean for voice
             sentence = trimForVoice(sentence);
-            // Skip NO_REPLY fragments and bare "NO" (agent signal, not speech)
-            if (sentence && sentence.length > 1 && !/^\s*(NO_REPLY|HEARTBEAT_OK|NO)\s*$/i.test(sentence)) {
-              onSentence(sentence);
+            // Skip agent signal fragments (NO_REPLY, HEARTBEAT_OK, bare "NO")
+            if (!sentence || sentence.length < 2 || AGENT_SIGNAL_PATTERN.test(sentence)) {
+              continue;
             }
+            firstSentenceEmitted = true;
+            onSentence(sentence);
           }
         } catch {}
       }
@@ -171,7 +177,7 @@ export async function generateResponseStreaming(userMessage, history = [], signa
     // Flush remaining buffer as final sentence
     if (buffer.trim()) {
       const final = trimForVoice(buffer.trim());
-      if (final && final.length > 1) {
+      if (final && final.length > 1 && !AGENT_SIGNAL_PATTERN.test(final)) {
         onSentence(final);
       }
     }
