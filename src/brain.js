@@ -19,7 +19,8 @@ const COMPLETIONS_URL = `${GATEWAY_URL}/v1/chat/completions`;
 const SESSION_USER = process.env.SESSION_USER || 'jarvis-voice-user';
 
 // Voice tag prepended to messages so the agent formats for TTS
-const VOICE_TAG = `[VOICE] Respond for spoken TTS output. No markdown, no formatting, no bullet points, no numbered lists. Natural conversational speech only. Keep responses concise — this will be spoken aloud.`;
+// Key: use tools exactly as you would in text chat. The ONLY difference is output format.
+const VOICE_TAG = `[VOICE] This is a voice request. Use tools and take actions exactly as you would for a text message — check live data, run commands, use MCP services. The ONLY difference: format your final response for spoken TTS output. No markdown, no formatting, no bullet points, no numbered lists. Natural conversational speech only.`;
 
 /**
  * Trim response for voice - strip any markdown that slipped through
