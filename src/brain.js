@@ -55,6 +55,18 @@ function trimForVoice(text) {
  * 
  * Returns the full accumulated response text when the stream ends.
  */
+// Track active stream controller for graceful shutdown
+let activeStreamController = null;
+export function abortActiveStream() {
+  if (activeStreamController) {
+    activeStreamController.abort();
+    activeStreamController = null;
+  }
+}
+
+// Max time to wait with no tokens before aborting stream (tool calls can be long)
+const STREAM_INACTIVITY_TIMEOUT_MS = 90_000; // 90 seconds
+
 export async function generateResponseStreaming(userMessage, history = [], onSentence) {
   const voiceMessage = `${VOICE_TAG}\n\n${userMessage}`;
   
@@ -69,6 +81,7 @@ export async function generateResponseStreaming(userMessage, history = [], onSen
   };
   
   const controller = new AbortController();
+  activeStreamController = controller;
   
   try {
     const res = await fetch(COMPLETIONS_URL, {
@@ -93,59 +106,72 @@ export async function generateResponseStreaming(userMessage, history = [], onSen
     let fullText = '';
     let sentenceBuffer = '';
     
-    // Sentence boundary: period/exclamation/question followed by space and uppercase,
-    // or end-of-stream flush
     const SENTENCE_BOUNDARY = /([.!?])\s+(?=[A-Z])/;
     const MIN_SENTENCE_LENGTH = 20;
     
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let partial = '';
+    let lastTokenTime = Date.now();
     
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      partial += decoder.decode(value, { stream: true });
-      
-      // Process complete SSE lines
-      const lines = partial.split('\n');
-      partial = lines.pop() || ''; // Keep incomplete line
-      
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
+    // Inactivity watchdog — aborts if no data arrives for too long
+    let inactivityTimer = null;
+    const resetInactivityTimer = () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      lastTokenTime = Date.now();
+      inactivityTimer = setTimeout(() => {
+        console.warn(`⚠️  Stream inactivity timeout (${STREAM_INACTIVITY_TIMEOUT_MS / 1000}s) — aborting`);
+        controller.abort();
+      }, STREAM_INACTIVITY_TIMEOUT_MS);
+    };
+    resetInactivityTimer();
+    
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
         
-        try {
-          const parsed = JSON.parse(data);
-          const token = parsed.choices?.[0]?.delta?.content;
-          if (!token) continue;
+        resetInactivityTimer(); // Got data, reset watchdog
+        partial += decoder.decode(value, { stream: true });
+        
+        const lines = partial.split('\n');
+        partial = lines.pop() || '';
+        
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
           
-          fullText += token;
-          sentenceBuffer += token;
-          
-          // Check for sentence boundaries in the buffer
-          let match;
-          while ((match = SENTENCE_BOUNDARY.exec(sentenceBuffer)) !== null) {
-            const sentenceEnd = match.index + match[1].length;
-            const sentence = sentenceBuffer.slice(0, sentenceEnd).trim();
-            sentenceBuffer = sentenceBuffer.slice(sentenceEnd).trimStart();
+          try {
+            const parsed = JSON.parse(data);
+            const token = parsed.choices?.[0]?.delta?.content;
+            if (!token) continue;
             
-            if (sentence.length >= MIN_SENTENCE_LENGTH) {
-              const cleanSentence = trimForVoice(sentence);
-              if (cleanSentence) {
-                await onSentence(cleanSentence);
+            fullText += token;
+            sentenceBuffer += token;
+            
+            let match;
+            while ((match = SENTENCE_BOUNDARY.exec(sentenceBuffer)) !== null) {
+              const sentenceEnd = match.index + match[1].length;
+              const sentence = sentenceBuffer.slice(0, sentenceEnd).trim();
+              sentenceBuffer = sentenceBuffer.slice(sentenceEnd).trimStart();
+              
+              if (sentence.length >= MIN_SENTENCE_LENGTH) {
+                const cleanSentence = trimForVoice(sentence);
+                if (cleanSentence) {
+                  await onSentence(cleanSentence);
+                }
+              } else {
+                sentenceBuffer = sentence + ' ' + sentenceBuffer;
               }
-            } else {
-              // Too short — prepend back to buffer
-              sentenceBuffer = sentence + ' ' + sentenceBuffer;
             }
+          } catch {
+            // Skip malformed JSON chunks (tool-use, etc.)
           }
-        } catch {
-          // Skip malformed JSON chunks (tool-use, etc.)
         }
       }
+    } finally {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
     }
     
     // Flush remaining buffer
@@ -156,11 +182,13 @@ export async function generateResponseStreaming(userMessage, history = [], onSen
       }
     }
     
+    activeStreamController = null;
     return { text: trimForVoice(fullText), fullText, controller };
     
   } catch (err) {
+    activeStreamController = null;
     if (err.name === 'AbortError') {
-      console.log('Stream aborted (barge-in or disconnect)');
+      console.log('Stream aborted (barge-in, disconnect, or timeout)');
       return { text: '', fullText: '', controller };
     }
     console.error('Gateway streaming failed:', err.message);

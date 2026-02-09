@@ -21,7 +21,7 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse, generateResponseStreaming } from './brain.js';
+import { generateResponse, generateResponseStreaming, abortActiveStream } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences, STREAMING_TTS_ENABLED } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -71,6 +71,36 @@ const ACTIVE_CONVERSATION_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
 
 // Dynamic handoff channel — set via "focus #channel-name" voice command
 let activeHandoffChannelId = null;
+
+// ── Instant Ack (pre-generated audio files) ──────────────────────────
+
+const ACK_DIR = join(__dirname, '..', 'assets');
+const ACK_FILES = [];
+function loadAckFiles() {
+  for (let i = 1; i <= 10; i++) {
+    const p = join(ACK_DIR, `ack-${i}.mp3`);
+    if (existsSync(p)) ACK_FILES.push(p);
+  }
+  console.log(`🔊 Loaded ${ACK_FILES.length} ack audio files`);
+}
+let ackIndex = 0;
+function getNextAck() {
+  if (ACK_FILES.length === 0) return null;
+  const file = ACK_FILES[ackIndex % ACK_FILES.length];
+  ackIndex++;
+  return file;
+}
+
+// ── Smart Fallback: detect queries likely to trigger tool use ────────
+
+const TOOL_LIKELY_PATTERNS = [
+  /\b(search|look up|find out|research|investigate|google)\b/i,
+  /\b(check|read|open|look at|pull up)\s+(my |the |that )?(email|calendar|slack|linear|notion|inbox)/i,
+  /\b(what'?s|what is)\s+(happening|going on|the status|new)\b/i,
+  /\b(reverse engineer|decompil|disassembl|analyz)\b/i,
+  /\b(download|install|run|execute|deploy)\b/i,
+  /\b(scan|audit|monitor|track)\b/i,
+];
 
 // ── Audio Queue (for streaming TTS) ──────────────────────────────────
 
@@ -186,7 +216,7 @@ function findChannelByName(guild, name) {
 }
 
 // Focus command patterns — tolerant of Whisper punctuation (commas, periods, etc.)
-const FOCUS_PATTERN = /(?:focus|work\s+(?:in|on|from)|switch\s+to|post\s+(?:in|to))[,.:;!?\s]+#?([a-z0-9_-]+(?:[\s-]+[a-z0-9_-]+)*)/i;
+const FOCUS_PATTERN = /(?:focus\s+(?:on|in)|focus|work\s+(?:in|on|from)|switch\s+to|post\s+(?:in|to))[,.:;!?\s]+#?([a-z0-9_-]+(?:[\s-]+[a-z0-9_-]+)*)/i;
 const CLEAR_FOCUS_PATTERN = /(?:clear\s+focus|default\s+channel|reset\s+channel|unfocus)/i;
 
 function parseFocusCommand(transcript) {
@@ -208,6 +238,7 @@ client.once('ready', async () => {
   console.log(`🤖 Jarvis Voice Bot online as ${client.user.tag}`);
   console.log(`📡 Guild: ${GUILD_ID} | Voice: ${VOICE_CHANNEL_ID}`);
   
+  loadAckFiles();
   initAlertWebhook(client, GUILD_ID, ALLOWED_USERS, scheduleBriefingOnPause);
   startAlertWebhook();
   
@@ -534,79 +565,128 @@ async function handleSpeech(userId, audioBuffer) {
     conv = conversations.get(userId);
     const history = conv.history;
     
-    // 5. Send to gateway agent — streaming for fast time-to-first-audio
-    console.log('🧠 Thinking (streaming)...');
+    // 5. Instant ack — play a short audio so user knows they were heard
+    const ackFile = getNextAck();
+    if (ackFile) {
+      playAudio(ackFile).catch(() => {}); // Fire and forget, don't block
+    }
+    
+    // 6. Decide: streaming vs non-streaming based on query type
+    const likelyNeedsTools = TOOL_LIKELY_PATTERNS.some(p => p.test(transcript));
     
     let response = '';
     let sentenceCount = 0;
     let firstSentenceTime = 0;
     let disconnectedDuringStream = false;
     
-    try {
-      audioQueue.clear();
+    if (likelyNeedsTools) {
+      // Non-streaming path — tools dominate latency, streaming just hangs
+      console.log('🧠 Thinking (non-streaming, tool query detected)...');
       
-      const streamResult = await generateResponseStreaming(transcript, history, async (sentence) => {
-        sentenceCount++;
+      try {
+        const result = await generateResponse(transcript, history);
+        response = result.text;
         
-        // Check if user disconnected mid-stream
-        if (userDisconnected && !disconnectedDuringStream) {
-          disconnectedDuringStream = true;
+        if (userDisconnected) {
+          // Handle disconnect during non-streaming wait
+        } else if (response) {
+          // TTS the response sentence by sentence
+          const sentences = splitIntoSentences(response);
+          sentenceCount = sentences.length;
           audioQueue.clear();
-          console.log('📤 User disconnected mid-stream — switching to text accumulation');
-        }
-        
-        if (disconnectedDuringStream) {
-          // Don't TTS — just accumulate (fullText handles this)
-          return;
-        }
-        
-        // TTS this sentence and queue it
-        try {
-          const audio = await synthesizeSpeech(sentence);
-          if (audio) {
-            if (sentenceCount === 1) {
-              firstSentenceTime = Date.now() - startTime;
-              console.log(`⏱️  First audio: ${firstSentenceTime}ms`);
+          
+          for (let i = 0; i < sentences.length; i++) {
+            if (userDisconnected) { disconnectedDuringStream = true; break; }
+            try {
+              const audio = await synthesizeSpeech(sentences[i]);
+              if (audio) {
+                if (i === 0) {
+                  firstSentenceTime = Date.now() - startTime;
+                  console.log(`⏱️  First audio: ${firstSentenceTime}ms`);
+                }
+                audioQueue.add(audio);
+              }
+            } catch (err) {
+              console.error(`TTS sentence ${i + 1} failed:`, err.message);
             }
-            audioQueue.add(audio);
           }
-        } catch (err) {
-          console.error(`TTS sentence ${sentenceCount} failed:`, err.message);
         }
-      });
-      
-      response = streamResult.text || streamResult.fullText || '';
-      
-    } catch (streamErr) {
-      // Fallback to non-streaming if streaming fails
-      console.warn('⚠️  Streaming failed, falling back to non-streaming:', streamErr.message);
-      const fallbackResult = await generateResponse(transcript, history);
-      response = fallbackResult.text;
-      
-      // Play fallback response normally
-      if (!userDisconnected) {
+      } catch (err) {
+        console.error('Non-streaming brain call failed:', err.message);
+        response = "I'm having trouble processing that. Try again?";
         const audio = await synthesizeSpeech(response);
         if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
       }
+      
+    } else {
+      // Streaming path — conversational response, tokens flow fast
+      console.log('🧠 Thinking (streaming)...');
+      
+      try {
+        audioQueue.clear();
+        
+        const streamResult = await generateResponseStreaming(transcript, history, async (sentence) => {
+          sentenceCount++;
+          
+          if (userDisconnected && !disconnectedDuringStream) {
+            disconnectedDuringStream = true;
+            audioQueue.clear();
+            console.log('📤 User disconnected mid-stream — switching to text accumulation');
+          }
+          
+          if (disconnectedDuringStream) return;
+          
+          try {
+            const audio = await synthesizeSpeech(sentence);
+            if (audio) {
+              if (sentenceCount === 1) {
+                firstSentenceTime = Date.now() - startTime;
+                console.log(`⏱️  First audio: ${firstSentenceTime}ms`);
+              }
+              audioQueue.add(audio);
+            }
+          } catch (err) {
+            console.error(`TTS sentence ${sentenceCount} failed:`, err.message);
+          }
+        });
+        
+        response = streamResult.text || streamResult.fullText || '';
+        
+      } catch (streamErr) {
+        console.warn('⚠️  Streaming failed, falling back to non-streaming:', streamErr.message);
+        const fallbackResult = await generateResponse(transcript, history);
+        response = fallbackResult.text;
+        
+        if (!userDisconnected && response) {
+          const sentences = splitIntoSentences(response);
+          sentenceCount = sentences.length;
+          for (const s of sentences) {
+            const audio = await synthesizeSpeech(s);
+            if (audio) audioQueue.add(audio);
+          }
+        }
+      }
     }
     
-    console.log(`💬 Response (${sentenceCount} sentences): "${response.substring(0, 120)}..." (${Date.now() - startTime}ms)`);
+    console.log(`💬 Response (${sentenceCount} sentences): "${(response || '').substring(0, 120)}..." (${Date.now() - startTime}ms)`);
     
-    // 6. Update local history
+    // 7. Update local history
     history.push({ role: 'user', content: transcript });
-    history.push({ role: 'assistant', content: response });
+    history.push({ role: 'assistant', content: response || '' });
     while (history.length > 40) history.shift();
     
-    // 7. Handle disconnect during stream — post accumulated text to channel
+    // 8. Handle disconnect — post accumulated text to channel
     if (disconnectedDuringStream || (userDisconnected && sentenceCount === 0)) {
       console.log('📤 User disconnected — posting response to text channel');
-      const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
-      await postToTextChannel(handoffMsg);
+      if (response) {
+        const handoffMsg = `🎙️ **Voice handoff:**\n${response}`;
+        await postToTextChannel(handoffMsg);
+      }
       markBotResponse(userId);
       return;
     }
     
-    // 8. Wait for audio queue to drain (streaming sentences already queued)
+    // 9. Wait for audio queue to drain
     while (audioQueue.playing || audioQueue.queue.length > 0) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
@@ -727,12 +807,14 @@ function savePcmAsWav(pcmBuffer, outputPath) {
 // ── Graceful Shutdown ────────────────────────────────────────────────
 
 process.on('SIGINT', () => {
+  abortActiveStream();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
+  abortActiveStream();
   if (currentConnection) currentConnection.destroy();
   client.destroy();
   process.exit(0);
