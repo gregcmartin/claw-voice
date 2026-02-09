@@ -21,7 +21,7 @@ import { createWriteStream, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse, generateResponseStreaming, trimForVoice, setModel, getCurrentModel } from './brain.js';
+import { generateResponse, generateResponseStreaming, trimForVoice } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -91,24 +91,7 @@ function isInterruptCommand(transcript) {
   return INTERRUPT_PATTERNS.some(p => p.test(clean));
 }
 
-// Model switching patterns — ONLY match short direct commands, not embedded in longer sentences
-// Must be the whole utterance (with optional "Jarvis" prefix), not part of a larger instruction
-const MODE_SWITCH_PATTERNS = [
-  { pattern: /^(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:basic|haiku)\s*(?:mode)?\s*$/i, mode: 'basic' },
-  { pattern: /^(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:default|sonnet|normal)\s*(?:mode)?\s*$/i, mode: 'default' },
-  { pattern: /^(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:advanced|opus)\s*(?:mode)?\s*$/i, mode: 'advanced' },
-];
-
-function detectModeSwitch(transcript) {
-  const clean = transcript.trim().replace(/[.,!?;:]+$/g, '');
-  // Only trigger on short commands (under ~8 words) to avoid matching
-  // "plan with opus, do with sonnet" as a mode switch
-  if (clean.split(/\s+/).length > 8) return null;
-  for (const { pattern, mode } of MODE_SWITCH_PATTERNS) {
-    if (pattern.test(clean)) return mode;
-  }
-  return null;
-}
+// Model switching removed — gateway agent handles this via session_status tool
 
 // Voice-to-text handoff tracking
 let userDisconnected = false;
@@ -538,16 +521,6 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
     }
     
     // ── Quick commands (synchronous — no brain call needed) ──
-    
-    // Model/mode switching
-    const modeSwitch = detectModeSwitch(rawTranscript);
-    if (modeSwitch) {
-      const { modeName } = setModel(modeSwitch);
-      markBotResponse(userId);
-      const audio = await synthesizeSpeech(`Switched to ${modeName}.`);
-      if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
-      return;
-    }
     
     // Focus command
     const focusCmd = parseFocusCommand(transcript);

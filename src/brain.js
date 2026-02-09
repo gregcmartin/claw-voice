@@ -21,48 +21,8 @@ const COMPLETIONS_URL = `${GATEWAY_URL}/v1/chat/completions`;
 // Use the main Discord text channel session — same brain as chat
 const SESSION_USER = process.env.SESSION_USER || 'jarvis-voice-user';
 
-// ── Model Switching ──────────────────────────────────────────────────
-// Three modes: basic (haiku), default (sonnet), advanced (opus)
-const MODELS = {
-  basic: 'anthropic/claude-haiku-4-5',
-  default: 'anthropic/claude-sonnet-4-5',
-  advanced: 'anthropic/claude-opus-4-6',
-};
-
-let currentModel = MODELS[process.env.VOICE_DEFAULT_MODE || 'basic'];
-
-/**
- * Get the current model
- */
-export function getCurrentModel() {
-  return currentModel;
-}
-
-/**
- * Set the active model by mode name or full model string
- * @param {string} mode - 'basic'|'haiku'|'default'|'sonnet'|'advanced'|'opus' or full model string
- * @returns {{ model: string, modeName: string }} The new active model
- */
-export function setModel(mode) {
-  const modeMap = {
-    basic: 'basic', haiku: 'basic',
-    default: 'default', sonnet: 'default', normal: 'default',
-    advanced: 'advanced', opus: 'advanced',
-  };
-  
-  const key = modeMap[mode.toLowerCase()];
-  if (key) {
-    currentModel = MODELS[key];
-    const modeName = key === 'basic' ? 'Haiku (basic)' : key === 'default' ? 'Sonnet (default)' : 'Opus (advanced)';
-    console.log(`🧠 Model switched to ${modeName}: ${currentModel}`);
-    return { model: currentModel, modeName };
-  }
-  
-  // Allow full model string passthrough
-  currentModel = mode;
-  console.log(`🧠 Model switched to custom: ${currentModel}`);
-  return { model: currentModel, modeName: mode };
-}
+// Model selection delegated to gateway — voice bot doesn't pick the model.
+// Gateway agent uses session_status to switch models as needed.
 
 // Voice tag prepended to messages so the agent formats for TTS
 // Key: use tools exactly as you would in text chat. The ONLY difference is output format.
@@ -139,7 +99,6 @@ export async function generateResponseStreaming(userMessage, history = [], signa
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: currentModel,
         messages,
         max_tokens: 8192,
         user: SESSION_USER,
@@ -278,7 +237,6 @@ export async function generateResponse(userMessage, history = [], signal) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: currentModel,
         messages,
         max_tokens: 8192,
         user: SESSION_USER,
