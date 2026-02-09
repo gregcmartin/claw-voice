@@ -91,15 +91,19 @@ function isInterruptCommand(transcript) {
   return INTERRUPT_PATTERNS.some(p => p.test(clean));
 }
 
-// Model switching patterns
+// Model switching patterns — ONLY match short direct commands, not embedded in longer sentences
+// Must be the whole utterance (with optional "Jarvis" prefix), not part of a larger instruction
 const MODE_SWITCH_PATTERNS = [
-  { pattern: /(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:basic|haiku)\s*(?:mode)?/i, mode: 'basic' },
-  { pattern: /(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:default|sonnet|normal)\s*(?:mode)?/i, mode: 'default' },
-  { pattern: /(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:advanced|opus)\s*(?:mode)?/i, mode: 'advanced' },
+  { pattern: /^(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:basic|haiku)\s*(?:mode)?\s*$/i, mode: 'basic' },
+  { pattern: /^(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:default|sonnet|normal)\s*(?:mode)?\s*$/i, mode: 'default' },
+  { pattern: /^(?:jarvis\s*[,.]?\s*)?(?:switch to |go to |use )?(?:advanced|opus)\s*(?:mode)?\s*$/i, mode: 'advanced' },
 ];
 
 function detectModeSwitch(transcript) {
   const clean = transcript.trim().replace(/[.,!?;:]+$/g, '');
+  // Only trigger on short commands (under ~8 words) to avoid matching
+  // "plan with opus, do with sonnet" as a mode switch
+  if (clean.split(/\s+/).length > 8) return null;
   for (const { pattern, mode } of MODE_SWITCH_PATTERNS) {
     if (pattern.test(clean)) return mode;
   }
