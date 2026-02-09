@@ -259,12 +259,17 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     userDisconnected = false; // Reset disconnect flag on join
     activeHandoffChannelId = null; // Reset focus on new session
     console.log(`👋 User joined voice channel`);
-    // Only brief pending alerts on join — no greeting chime
+    // Quick "Jarvis online" on join — no waiting for AI-generated greeting
     setTimeout(async () => {
+      try {
+        const audio = await synthesizeSpeech('Jarvis online.');
+        if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
+      } catch {}
+      // Brief pending alerts after greeting
       if (hasPendingAlerts()) {
         await briefPendingAlerts(newState.id);
       }
-    }, 2000);
+    }, 500);
   }
   
   // User left
