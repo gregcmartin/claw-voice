@@ -139,11 +139,16 @@ export async function generateResponseStreaming(userMessage, history = [], signa
           fullText += content;
           
           // Strip [[tts:...]] tags from the streaming buffer before sentence detection
-          // These tags span across sentences so strip them from the raw buffer
           buffer = buffer.replace(/\[\[tts:[^\]]*\]\]/g, '');
           buffer = buffer.replace(/\[\[\/tts:text\]\]/g, '');
           buffer = buffer.replace(/\[\[tts:text\]\]/g, '');
           buffer = buffer.replace(/\[\[reply_to[^\]]*\]\]/g, '');
+          
+          // Filter out NO_REPLY / HEARTBEAT_OK signals
+          if (/^\s*NO_REPLY\s*$/i.test(buffer) || /^\s*HEARTBEAT_OK\s*$/i.test(buffer)) {
+            buffer = '';
+            continue;
+          }
           
           // Check for complete sentences and emit them
           let match;
@@ -154,7 +159,8 @@ export async function generateResponseStreaming(userMessage, history = [], signa
             
             // Clean for voice
             sentence = trimForVoice(sentence);
-            if (sentence && sentence.length > 1) {
+            // Skip NO_REPLY fragments and bare "NO" (agent signal, not speech)
+            if (sentence && sentence.length > 1 && !/^\s*(NO_REPLY|HEARTBEAT_OK|NO)\s*$/i.test(sentence)) {
               onSentence(sentence);
             }
           }
@@ -168,6 +174,12 @@ export async function generateResponseStreaming(userMessage, history = [], signa
       if (final && final.length > 1) {
         onSentence(final);
       }
+    }
+    
+    // Check for NO_REPLY / HEARTBEAT_OK — agent had nothing to say
+    const trimmedFull = fullText.trim();
+    if (trimmedFull === 'NO_REPLY' || trimmedFull === 'HEARTBEAT_OK' || trimmedFull === 'NO') {
+      return { text: '', silent: true };
     }
     
     return { text: trimForVoice(fullText) };
