@@ -21,7 +21,7 @@ import { createWriteStream, readFileSync, mkdirSync, existsSync, unlinkSync } fr
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { transcribeAudio } from './stt.js';
-import { generateResponse } from './brain.js';
+import { generateResponse, generateResponseStreaming } from './brain.js';
 import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
@@ -575,10 +575,36 @@ async function handleSpeech(userId, audioBuffer, preTranscribed = null) {
  */
 async function processBrainTask(taskId, userId, transcript, history, signal) {
   const startTime = Date.now();
+  let firstAudioLogged = false;
+  let fullResponse = '';
   
   try {
     console.log(`🧠 Task #${taskId} thinking...`);
-    const result = await generateResponse(transcript, history, signal);
+    
+    // Stream response — TTS each sentence as it arrives
+    const result = await generateResponseStreaming(transcript, history, signal, async (sentence) => {
+      fullResponse += sentence + ' ';
+      
+      if (!firstAudioLogged) {
+        firstAudioLogged = true;
+        console.log(`⏱️  Task #${taskId} first sentence: ${Date.now() - startTime}ms`);
+      }
+      
+      // TTS and queue immediately — don't wait
+      if (userDisconnected) {
+        await postToTextChannel(`🎙️ ${sentence}`);
+        return;
+      }
+      
+      try {
+        const audio = await synthesizeSpeech(sentence);
+        if (audio) {
+          audioQueue.add(audio);
+        }
+      } catch (err) {
+        console.error(`TTS failed for sentence:`, err.message);
+      }
+    });
     
     // Task was cancelled
     if (result.aborted) {
@@ -587,81 +613,35 @@ async function processBrainTask(taskId, userId, transcript, history, signal) {
       return;
     }
     
-    const response = result.text;
-    console.log(`💬 Task #${taskId} done (${Date.now() - startTime}ms): "${(response || '').substring(0, 80)}..."`);
+    console.log(`💬 Task #${taskId} done (${Date.now() - startTime}ms): "${(fullResponse || '').substring(0, 80)}..."`);
     
-    // Update conversation history with response
+    // Update conversation history with full response
     const conv = conversations.get(userId);
     if (conv) {
-      conv.history.push({ role: 'assistant', content: response || '' });
+      conv.history.push({ role: 'assistant', content: result.text || fullResponse || '' });
       while (conv.history.length > 40) conv.history.shift();
     }
     
     // Remove from active tasks
     activeTasks.delete(taskId);
-    
-    // Handle disconnect — post to text instead
-    if (userDisconnected) {
-      console.log(`📤 Task #${taskId} — user disconnected, posting to text`);
-      if (response) {
-        await postToTextChannel(`🎙️ **Voice handoff:**\n${response}`);
-      }
-      markBotResponse(userId);
-      return;
-    }
-    
-    // Speak response immediately — feed sentences directly into audio queue
-    // No waiting for other tasks. First to finish, first to speak.
-    if (response) {
-      await speakResponse(taskId, userId, response, startTime);
-    }
-    
     markBotResponse(userId);
+    
+    // Brief pending alerts on natural pause
+    if (pendingAlertBriefingForUser && hasPendingAlerts() && activeTasks.size === 0) {
+      const uid = pendingAlertBriefingForUser;
+      pendingAlertBriefingForUser = null;
+      setImmediate(() => briefPendingAlerts(uid));
+    }
     
   } catch (err) {
     activeTasks.delete(taskId);
     if (err.name !== 'AbortError') {
       console.error(`❌ Task #${taskId} failed:`, err.message);
-      await speakResponse(taskId, userId, "I had trouble with that one. Try again?", Date.now());
+      try {
+        const audio = await synthesizeSpeech("I had trouble with that one. Try again?");
+        if (audio) audioQueue.add(audio);
+      } catch {}
     }
-  }
-}
-
-/**
- * Speak a response immediately — feeds sentences into the shared audio queue.
- * Multiple tasks can call this concurrently; the audio queue handles ordering.
- * Each response gets a brief pause before it to separate from prior audio.
- */
-async function speakResponse(taskId, userId, response, startTime) {
-  if (userDisconnected) {
-    await postToTextChannel(`🎙️ **Voice handoff:**\n${response}`);
-    return;
-  }
-  
-  const sentences = splitIntoSentences(response);
-  
-  for (let i = 0; i < sentences.length; i++) {
-    if (userDisconnected) {
-      const remaining = sentences.slice(i).join(' ');
-      await postToTextChannel(`🎙️ **Voice handoff:**\n${remaining}`);
-      break;
-    }
-    try {
-      const audio = await synthesizeSpeech(sentences[i]);
-      if (audio) {
-        if (i === 0) console.log(`⏱️  Task #${taskId} first audio: ${Date.now() - startTime}ms`);
-        audioQueue.add(audio);
-      }
-    } catch (err) {
-      console.error(`TTS sentence ${i + 1} failed:`, err.message);
-    }
-  }
-  
-  // Brief pending alerts on natural pause
-  if (pendingAlertBriefingForUser && hasPendingAlerts() && activeTasks.size === 0) {
-    const uid = pendingAlertBriefingForUser;
-    pendingAlertBriefingForUser = null;
-    setImmediate(() => briefPendingAlerts(uid));
   }
 }
 
