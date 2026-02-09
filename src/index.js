@@ -166,8 +166,25 @@ async function briefPendingAlerts(userId) {
   if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
   markBotResponse(userId);
   
-  if (!conversations.has(userId)) conversations.set(userId, { history: [] });
-  conversations.get(userId).pendingAlertBriefing = alerts;
+  // Inject alert context into conversation history so gateway agent can handle follow-ups
+  if (!conversations.has(userId)) conversations.set(userId, { history: [], lastActive: Date.now() });
+  const conv = conversations.get(userId);
+  conv.lastActive = Date.now();
+  
+  // Build detailed alert context for the agent
+  let alertContext = `[SYSTEM] The following alerts were queued while user was away and just briefed via TTS:\n`;
+  for (const alert of alerts) {
+    alertContext += `- [${alert.priority}] ${getTimeAgo(alert.timestamp)}: ${alert.message}`;
+    if (alert.fullDetails) alertContext += ` | Details: ${alert.fullDetails}`;
+    if (alert.source) alertContext += ` (source: ${alert.source})`;
+    alertContext += '\n';
+  }
+  alertContext += `User was told: "${briefing}"\nIf they ask for details, provide the full alert information above.`;
+  
+  conv.history.push({ role: 'assistant', content: alertContext });
+  while (conv.history.length > 40) conv.history.shift();
+  
+  clearAlerts();
 }
 
 function scheduleBriefingOnPause(userId) {
