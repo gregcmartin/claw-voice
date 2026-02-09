@@ -560,39 +560,18 @@ async function handleSpeech(userId, audioBuffer) {
       return;
     }
     
-    // 4. Build Discord context for agent (channels, guild info)
-    let discordContext = '';
-    try {
-      const guild = client.guilds.cache.get(GUILD_ID);
-      if (guild) {
-        const textChannels = guild.channels.cache
-          .filter(ch => ch.isTextBased() && !ch.isVoiceBased())
-          .map(ch => `#${ch.name} (${ch.id})${ch.parent ? ` in ${ch.parent.name}` : ''}`)
-          .slice(0, 30); // Limit to 30 channels
-        
-        if (textChannels.length > 0) {
-          discordContext = `\n\n[DISCORD CONTEXT] Guild: ${guild.name}. Available text channels: ${textChannels.join(', ')}`;
-        }
-      }
-    } catch (err) {
-      console.error('Failed to build Discord context:', err.message);
-    }
-    
-    // 5. Get conversation history and append context
+    // 4. Get conversation history
     if (!conversations.has(userId)) conversations.set(userId, { history: [] });
     conv = conversations.get(userId);
-    let history = conv.history;
+    const history = conv.history;
     
-    // Inject Discord context into the transcript for the agent
-    const contextualTranscript = discordContext ? transcript + discordContext : transcript;
-    
-    // 6. Instant ack — play a short audio so user knows they were heard
+    // 5. Instant ack — play a short audio so user knows they were heard
     const ackFile = getNextAck();
     if (ackFile) {
       playAudio(ackFile).catch(() => {}); // Fire and forget, don't block
     }
     
-    // 7. Decide: streaming vs non-streaming based on query type
+    // 6. Decide: streaming vs non-streaming based on query type
     const likelyNeedsTools = TOOL_LIKELY_PATTERNS.some(p => p.test(transcript));
     
     let response = '';
@@ -605,7 +584,7 @@ async function handleSpeech(userId, audioBuffer) {
       console.log('🧠 Thinking (non-streaming, tool query detected)...');
       
       try {
-        const result = await generateResponse(contextualTranscript, history);
+        const result = await generateResponse(transcript, history);
         response = result.text;
         
         if (userDisconnected) {
@@ -646,7 +625,7 @@ async function handleSpeech(userId, audioBuffer) {
       try {
         audioQueue.clear();
         
-        const streamResult = await generateResponseStreaming(contextualTranscript, history, async (sentence) => {
+        const streamResult = await generateResponseStreaming(transcript, history, async (sentence) => {
           sentenceCount++;
           
           if (userDisconnected && !disconnectedDuringStream) {
@@ -675,7 +654,7 @@ async function handleSpeech(userId, audioBuffer) {
         
       } catch (streamErr) {
         console.warn('⚠️  Streaming failed, falling back to non-streaming:', streamErr.message);
-        const fallbackResult = await generateResponse(contextualTranscript, history);
+        const fallbackResult = await generateResponse(transcript, history);
         response = fallbackResult.text;
         
         if (!userDisconnected && response) {
@@ -691,12 +670,12 @@ async function handleSpeech(userId, audioBuffer) {
     
     console.log(`💬 Response (${sentenceCount} sentences): "${(response || '').substring(0, 120)}..." (${Date.now() - startTime}ms)`);
     
-    // 8. Update local history
+    // 7. Update local history
     history.push({ role: 'user', content: transcript });
     history.push({ role: 'assistant', content: response || '' });
     while (history.length > 40) history.shift();
     
-    // 9. Handle disconnect — post accumulated text to channel
+    // 8. Handle disconnect — post accumulated text to channel
     if (disconnectedDuringStream || (userDisconnected && sentenceCount === 0)) {
       console.log('📤 User disconnected — posting response to text channel');
       if (response) {
@@ -707,7 +686,7 @@ async function handleSpeech(userId, audioBuffer) {
       return;
     }
     
-    // 10. Wait for audio queue to drain
+    // 9. Wait for audio queue to drain
     while (audioQueue.playing || audioQueue.queue.length > 0) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
