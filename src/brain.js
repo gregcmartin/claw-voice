@@ -60,10 +60,6 @@ export async function generateResponse(userMessage, history = []) {
       'Authorization': `Bearer ${GATEWAY_TOKEN}`,
     };
     
-    // Timeout: 60s max for brain calls
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
       headers,
@@ -73,10 +69,7 @@ export async function generateResponse(userMessage, history = []) {
         max_tokens: 8192,
         user: SESSION_USER,
       }),
-      signal: controller.signal,
     });
-    
-    clearTimeout(timeoutId);
     
     if (!res.ok) {
       const body = await res.text();
@@ -93,10 +86,6 @@ export async function generateResponse(userMessage, history = []) {
     return { text };
     
   } catch (err) {
-    if (err.name === 'AbortError') {
-      console.error('⏱️  Gateway timeout (60s)');
-      return { text: "That's taking too long. Let me try a different approach." };
-    }
     console.error('Gateway failed:', err.message);
     return { text: "I'm having trouble connecting right now. Try again?" };
   }
