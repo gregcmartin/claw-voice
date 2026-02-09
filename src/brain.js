@@ -68,7 +68,7 @@ export async function generateResponse(userMessage, history = []) {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: 'clawdbot:main',
+        model: 'anthropic/claude-haiku-4-5',  // Haiku for fast voice responses
         messages,
         max_tokens: 8192,
         user: SESSION_USER,
