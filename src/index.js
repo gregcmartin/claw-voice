@@ -185,14 +185,16 @@ function findChannelByName(guild, name) {
   return channel || null;
 }
 
-// Focus command patterns
-const FOCUS_PATTERN = /(?:focus|work\s+(?:in|on|from)|switch\s+to|post\s+(?:in|to))\s+#?([a-z0-9_-]+(?:\s+[a-z0-9_-]+)*)/i;
+// Focus command patterns — tolerant of Whisper punctuation (commas, periods, etc.)
+const FOCUS_PATTERN = /(?:focus|work\s+(?:in|on|from)|switch\s+to|post\s+(?:in|to))[,.:;!?\s]+#?([a-z0-9_-]+(?:[\s-]+[a-z0-9_-]+)*)/i;
 const CLEAR_FOCUS_PATTERN = /(?:clear\s+focus|default\s+channel|reset\s+channel|unfocus)/i;
 
 function parseFocusCommand(transcript) {
-  if (CLEAR_FOCUS_PATTERN.test(transcript)) return { action: 'clear' };
-  const match = transcript.match(FOCUS_PATTERN);
-  if (match) return { action: 'focus', channelName: match[1].replace(/\s+/g, '-') };
+  // Strip trailing punctuation for cleaner matching
+  const clean = transcript.replace(/[.,!?;:]+$/g, '').trim();
+  if (CLEAR_FOCUS_PATTERN.test(clean)) return { action: 'clear' };
+  const match = clean.match(FOCUS_PATTERN);
+  if (match) return { action: 'focus', channelName: match[1].replace(/[.,!?;:]/g, '').replace(/\s+/g, '-').trim() };
   return null;
 }
 
