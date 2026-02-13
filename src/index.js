@@ -1,5 +1,5 @@
 /**
- * Jarvis Voice Bot - Discord Real-Time Voice Assistant
+ * Mandy Voice Bot - Discord Real-Time Voice Assistant
  * 
  * Thin voice I/O layer: Discord mic → Whisper STT → Clawdbot Gateway → TTS → Discord speaker
  * Same agent, same session, same tools as text chat. Voice is just another input method.
@@ -26,7 +26,7 @@ import { synthesizeSpeech, splitIntoSentences } from './tts.js';
 import { OpusDecoder } from './opus-decoder.js';
 import { checkWakeWord, markBotResponse, WAKE_WORD_ENABLED } from './wakeword.js';
 import { queueAlert, hasPendingAlerts, getPendingAlerts, clearAlerts } from './alert-queue.js';
-import { startAlertWebhook, initAlertWebhook, setCurrentVoiceChannelId } from './alert-webhook.js';
+// import { startAlertWebhook, initAlertWebhook, setCurrentVoiceChannelId } from './alert-webhook.js';
 
 const GATEWAY_URL = process.env.CLAWDBOT_GATEWAY_URL || 'http://127.0.0.1:22100';
 const GATEWAY_TOKEN = process.env.CLAWDBOT_GATEWAY_TOKEN;
@@ -81,9 +81,9 @@ let taskIdCounter = 0;
 
 // Interrupt/stop command detection
 const INTERRUPT_PATTERNS = [
-  /^(jarvis\s*[,.]?\s*)?(stop|cancel|abort|shut up|be quiet|enough|nevermind|never mind|hold on|wait)\.?$/i,
-  /^(jarvis\s*[,.]?\s*)?(stop|cancel)\s+(that|it|talking|speaking|please|now)\.?$/i,
-  /^(jarvis\s*[,.]?\s*)?that's\s+(enough|ok|okay|fine)\.?$/i,
+  /^(mandy\s*[,.]?\s*)?(stop|cancel|abort|shut up|be quiet|enough|nevermind|never mind|hold on|wait)\.?$/i,
+  /^(mandy\s*[,.]?\s*)?(stop|cancel)\s+(that|it|talking|speaking|please|now)\.?$/i,
+  /^(mandy\s*[,.]?\s*)?that's\s+(enough|ok|okay|fine)\.?$/i,
 ];
 
 function isInterruptCommand(transcript) {
@@ -198,7 +198,7 @@ async function generateDynamicGreeting() {
   const hour = now.getHours();
   const timeOfDay = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
   
-  const prompt = `You are Jarvis, a British AI butler. Generate ONE short greeting (under 15 words) for ${timeOfDay}. Dry wit welcome. No quotes, just the text.`;
+  const prompt = `You are Mandy, a friendly AI voice assistant. Generate ONE short greeting (under 15 words) for ${timeOfDay}. Warm and concise. No quotes, just the text.`;
   
   try {
     const res = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
@@ -226,11 +226,11 @@ const client = new Client({
 });
 
 client.once('ready', async () => {
-  console.log(`🤖 Jarvis Voice Bot online as ${client.user.tag}`);
+  console.log(`🤖 Mandy Voice Bot online as ${client.user.tag}`);
   console.log(`📡 Guild: ${GUILD_ID} | Voice: ${VOICE_CHANNEL_ID}`);
   
-  initAlertWebhook(client, GUILD_ID, ALLOWED_USERS, scheduleBriefingOnPause);
-  startAlertWebhook();
+  // initAlertWebhook(client, GUILD_ID, ALLOWED_USERS, scheduleBriefingOnPause);
+  // startAlertWebhook();
   
   try {
     await joinChannel(VOICE_CHANNEL_ID, { greeting: true });
@@ -249,10 +249,10 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
   if (!oldState.channelId && newState.channelId === currentVoiceChannelId) {
     userDisconnected = false; // Reset disconnect flag on join
     console.log(`👋 User joined voice channel`);
-    // Quick "Jarvis online" on join — no waiting for AI-generated greeting
+    // Quick "Mandy online" on join — no waiting for AI-generated greeting
     setTimeout(async () => {
       try {
-        const audio = await synthesizeSpeech('Jarvis online.');
+        const audio = await synthesizeSpeech('Mandy online.');
         if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
       } catch {}
       // Brief pending alerts after greeting
@@ -348,7 +348,7 @@ async function joinChannel(voiceChannelId, options = {}) {
   connection.subscribe(player);
   currentConnection = connection;
   currentVoiceChannelId = voiceChannelId;
-  setCurrentVoiceChannelId(voiceChannelId);
+  // setCurrentVoiceChannelId(voiceChannelId); // Disabled - webhook feature
   
   // Reconnect on disconnect — named handler + once() to prevent listener accumulation
   const handleDisconnect = async () => {
@@ -382,8 +382,12 @@ async function joinChannel(voiceChannelId, options = {}) {
   });
   
   receiver.speaking.on('start', (userId) => {
-    if (!ALLOWED_USERS.includes(userId)) return;
-    
+    if (!ALLOWED_USERS.includes(userId)) {
+      console.log(`🔇 Ignored speech from non-allowed user: ${userId}`);
+      return;
+    }
+    console.log(`🎤 Speaking start: ${userId} (isSpeaking=${isSpeaking}, userSpeaking=${userSpeaking.has(userId)})`);
+
     // Barge-in detection
     if (isSpeaking) {
       if (!bargeInTimers.has(userId)) {
@@ -426,12 +430,26 @@ async function joinChannel(voiceChannelId, options = {}) {
         userSpeaking.delete(userId);
         const totalBuffer = Buffer.concat(chunks);
         const durationMs = (totalBuffer.length / (48000 * 2)) * 1000;
-        
-        if (durationMs < MIN_AUDIO_DURATION_MS) return;
-        
+
+        if (durationMs < MIN_AUDIO_DURATION_MS) {
+          console.log(`🔇 Audio too short: ${Math.round(durationMs)}ms < ${MIN_AUDIO_DURATION_MS}ms`);
+          return;
+        }
+
+        // Energy filter — reject background noise / silence before hitting STT APIs
+        const rms = computeRMS(totalBuffer);
+        if (rms < 500) {
+          console.log(`🔇 Audio too quiet: RMS=${Math.round(rms)} < 500`);
+          return;
+        }
+        console.log(`🎙️ Audio accepted: ${Math.round(durationMs)}ms, RMS=${Math.round(rms)}`);
+
+        // Downsample 48kHz → 16kHz for faster STT processing
+        const downsampled = downsample48to16(totalBuffer);
+
         // Fully async — every utterance goes straight to handleSpeech
         // No blocking, no queueing. Multiple brain calls run concurrently.
-        await handleSpeech(userId, totalBuffer);
+        await handleSpeech(userId, downsampled);
       });
       
       userSpeaking.set(userId, { startTime: Date.now() });
@@ -444,7 +462,7 @@ async function joinChannel(voiceChannelId, options = {}) {
 
 async function playGreeting() {
   try {
-    const audio = await synthesizeSpeech('Jarvis online. Voice channel is live.');
+    const audio = await synthesizeSpeech('Mandy online. Voice channel is live.');
     if (audio) { await playAudio(audio); try { unlinkSync(audio); } catch {} }
   } catch (err) {
     console.error('Greeting failed:', err.message);
@@ -700,9 +718,41 @@ async function playAudio(audioPath) {
 
 // ── WAV Helper ───────────────────────────────────────────────────────
 
+/**
+ * Compute RMS energy of 16-bit PCM audio
+ */
+function computeRMS(pcmBuffer) {
+  const samples = pcmBuffer.length / 2;
+  if (samples === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < pcmBuffer.length; i += 2) {
+    const sample = pcmBuffer.readInt16LE(i);
+    sum += sample * sample;
+  }
+  return Math.sqrt(sum / samples);
+}
+
+/**
+ * Downsample 48kHz 16-bit mono PCM to 16kHz by averaging every 3 samples
+ */
+function downsample48to16(pcmBuffer) {
+  const ratio = 3;
+  const inputSamples = pcmBuffer.length / 2;
+  const outputSamples = Math.floor(inputSamples / ratio);
+  const output = Buffer.alloc(outputSamples * 2);
+  for (let i = 0; i < outputSamples; i++) {
+    let sum = 0;
+    for (let j = 0; j < ratio; j++) {
+      sum += pcmBuffer.readInt16LE((i * ratio + j) * 2);
+    }
+    output.writeInt16LE(Math.round(sum / ratio), i * 2);
+  }
+  return output;
+}
+
 function savePcmAsWav(pcmBuffer, outputPath) {
   return new Promise((resolve, reject) => {
-    const sampleRate = 48000, numChannels = 1, bitsPerSample = 16;
+    const sampleRate = 16000, numChannels = 1, bitsPerSample = 16;
     const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
     const blockAlign = numChannels * (bitsPerSample / 8);
     const dataSize = pcmBuffer.length;

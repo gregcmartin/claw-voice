@@ -69,7 +69,7 @@ app.post('/alert', async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'jarvis-voice-alerts' });
+  res.json({ ok: true, service: 'mandy-voice-alerts' });
 });
 
 function isUserInVoice(userId) {

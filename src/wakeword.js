@@ -8,7 +8,7 @@
 import 'dotenv/config';
 
 const WAKE_WORD_ENABLED = process.env.WAKE_WORD_ENABLED === 'true';
-const WAKE_WORD_PHRASES = (process.env.WAKE_WORD_PHRASES || 'jarvis,hey jarvis,hey travis,yo jarvis')
+const WAKE_WORD_PHRASES = (process.env.WAKE_WORD_PHRASES || 'mandy,hey mandy')
   .split(',')
   .map(p => p.trim().toLowerCase());
 const CONVERSATION_WINDOW_MS = parseInt(process.env.CONVERSATION_WINDOW_MS || '60000'); // 60 seconds

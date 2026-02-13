@@ -21,7 +21,7 @@ const MOVE_PATTERNS = [
 
 const FOCUS_PATTERNS = [
   /\b(?:focus on|switch to)\s+(?:the\s+)?(\w+(?:\s+\w+)?)$/i,  // Max 2 words
-  /\b(?:jarvis)\s+(\w+)$/i,  // "jarvis security", "jarvis gibson"
+  /\b(?:mandy)\s+(\w+)$/i,  // "mandy security", "mandy gibson"
 ];
 
 const QUERY_PATTERNS = [
@@ -201,7 +201,7 @@ export function loadDirective(directivePath) {
 }
 
 /**
- * Move Jarvis to a different voice channel
+ * Move Mandy to a different voice channel
  * @param {import('discord.js').Client} client - Discord client
  * @param {string} guildId - Guild ID
  * @param {string} targetVoiceChannelId - Target voice channel ID

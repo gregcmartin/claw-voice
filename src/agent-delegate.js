@@ -4,7 +4,7 @@
  * Determines when voice tasks should be delegated to background agents
  * and spawns them via Clawdbot Gateway.
  * 
- * The philosophy: Voice Jarvis is fast acknowledgment + handoff.
+ * The philosophy: Voice Mandy is fast acknowledgment + handoff.
  * Background agents do the heavy lifting and post results to text channel.
  */
 
@@ -85,10 +85,10 @@ export async function spawnBackgroundAgent(task, activeContext, outputChannel) {
   
   try {
     const timestamp = Date.now();
-    const label = `jarvis-voice-task:${timestamp}`;
+    const label = `mandy-voice-task:${timestamp}`;
     
     // Build task message with context
-    let taskMessage = `You are a background agent spawned by Jarvis Voice to handle a task.
+    let taskMessage = `You are a background agent spawned by Mandy Voice to handle a task.
 
 User request: "${task}"`;
 
@@ -137,8 +137,8 @@ Do not narrate your process. Just do the work and report results.`;
       },
       body: JSON.stringify({
         message: taskMessage,
-        name: 'JarvisVoiceDelegation',
-        sessionKey: `hook:jarvis-voice:task:${timestamp}`,
+        name: 'MandyVoiceDelegation',
+        sessionKey: `hook:mandy-voice:task:${timestamp}`,
         deliver: true,
         channel: 'discord', // Channel type (results post to last active Discord)
         wakeMode: 'now',
@@ -157,10 +157,10 @@ Do not narrate your process. Just do the work and report results.`;
     
     const data = await res.json();
     console.log(`✅ Background agent spawned successfully`);
-    console.log(`📊 Session: hook:jarvis-voice:task:${timestamp}`);
+    console.log(`📊 Session: hook:mandy-voice:task:${timestamp}`);
     
     return {
-      sessionKey: `hook:jarvis-voice:task:${timestamp}`,
+      sessionKey: `hook:mandy-voice:task:${timestamp}`,
       timestamp,
     };
     

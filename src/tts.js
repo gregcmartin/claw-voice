@@ -24,9 +24,11 @@ const STREAMING_TTS_ENABLED = process.env.STREAMING_TTS_ENABLED !== 'false'; // 
 // Find edge-tts binary
 const EDGE_TTS_BIN = process.env.EDGE_TTS_PATH || `${process.env.HOME}/.local/bin/edge-tts`;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let openai;
+function getOpenAI() {
+  if (!openai) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openai;
+}
 
 /**
  * Sanitize text input for TTS to avoid crashes
@@ -114,7 +116,12 @@ async function synthesizeEdge(text) {
     return outputPath;
   } catch (err) {
     console.error('Edge TTS failed, falling back to OpenAI:', err.message);
-    return synthesizeOpenAI(text);
+    try {
+      return await synthesizeOpenAI(text);
+    } catch (fallbackErr) {
+      console.error('OpenAI TTS fallback also failed:', fallbackErr.message);
+      return null;
+    }
   }
 }
 
@@ -182,7 +189,7 @@ async function synthesizeOpenAI(text) {
   const model = process.env.OPENAI_TTS_MODEL || 'tts-1';
   const voice = process.env.OPENAI_TTS_VOICE || 'onyx';
   
-  const response = await openai.audio.speech.create({
+  const response = await getOpenAI().audio.speech.create({
     model,
     voice,
     input: text,
@@ -200,7 +207,7 @@ async function synthesizeOpenAIStream(text) {
   const model = process.env.OPENAI_TTS_MODEL || 'tts-1';
   const voice = process.env.OPENAI_TTS_VOICE || 'onyx';
   
-  const response = await openai.audio.speech.create({
+  const response = await getOpenAI().audio.speech.create({
     model,
     voice,
     input: text,

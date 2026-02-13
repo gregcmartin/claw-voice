@@ -19,14 +19,14 @@ const GATEWAY_TOKEN = process.env.CLAWDBOT_GATEWAY_TOKEN;
 const COMPLETIONS_URL = `${GATEWAY_URL}/v1/chat/completions`;
 
 // Use the main Discord text channel session — same brain as chat
-const SESSION_USER = process.env.SESSION_USER || 'jarvis-voice-user';
+const SESSION_USER = process.env.SESSION_USER || 'mandy-voice-user';
 
 // Model selection delegated to gateway — voice bot doesn't pick the model.
 // Gateway agent uses session_status to switch models as needed.
 
 // Voice tag prepended to messages so the agent formats for TTS
 // Key: use tools exactly as you would in text chat. The ONLY difference is output format.
-const VOICE_TAG = `[VOICE] This is a voice request. Use tools and take actions exactly as you would for a text message — check live data, run commands, use MCP services. The ONLY difference: format your final response for spoken TTS output. No markdown, no formatting, no bullet points, no numbered lists. Natural conversational speech only.`;
+const VOICE_TAG = `[VOICE] This is a voice request. Use tools and take actions exactly as you would for a text message — check live data, run commands, use MCP services. The ONLY difference: format your final response for spoken TTS output. No markdown, no formatting, no bullet points, no numbered lists. Natural conversational speech only. IMPORTANT: Do NOT generate audio, do NOT use TTS tools, do NOT return MEDIA: tags or file paths. Return ONLY plain text — the voice client handles speech synthesis.`;
 
 // Sentence boundary pattern — split on . ! ? followed by space or end
 const SENTENCE_END = /[.!?]+(?:\s|$)/;
@@ -39,6 +39,7 @@ const AGENT_SIGNAL_PATTERN = /^\s*(NO_REPLY|HEARTBEAT_OK|NO)\s*[.!?]*\s*$/i;
  */
 export function trimForVoice(text) {
   let clean = text
+    .replace(/MEDIA:[^\s]+/g, '')            // MEDIA:/path/to/file → remove (gateway TTS leak)
     .replace(/\[\[tts:[^\]]*\]\]/g, '')      // [[tts:anything]] complete tag → remove
     .replace(/\[\[\/tts:[^\]]*\]\]/g, '')    // [[/tts:anything]] closing tag → remove
     .replace(/\[\[reply_to[^\]]*\]\]/g, '')  // [[reply_to:...]] tags → remove
@@ -59,7 +60,7 @@ export function trimForVoice(text) {
     .replace(/\n/g, ' ')                     // single newlines to spaces
     .replace(/\s{2,}/g, ' ')                // collapse spaces
     .trim();
-  
+
   return clean;
 }
 
@@ -90,6 +91,9 @@ export async function generateResponseStreaming(userMessage, history = [], signa
     signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
   
+  let fullText = '';
+  let buffer = '';
+
   try {
     const res = await fetch(COMPLETIONS_URL, {
       method: 'POST',
@@ -105,16 +109,12 @@ export async function generateResponseStreaming(userMessage, history = [], signa
         stream: true,
       }),
     });
-    
+
     if (!res.ok) {
       const body = await res.text();
       console.error('Gateway Error:', res.status, body);
       throw new Error(`Gateway ${res.status}: ${body}`);
     }
-    
-    // Parse SSE stream, accumulate text, emit sentences
-    let fullText = '';
-    let buffer = '';
     let firstSentenceEmitted = false;
     
     const reader = res.body.getReader();

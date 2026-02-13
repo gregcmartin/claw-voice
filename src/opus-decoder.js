@@ -1,49 +1,39 @@
 /**
  * Opus Decoder Transform Stream
- * 
+ *
  * Decodes Discord's Opus audio frames to raw PCM (48kHz, 16-bit, mono)
- * Uses prism-media for the actual decoding
+ * Uses opusscript (pure JS) to avoid native module segfaults
  */
 
 import { Transform } from 'stream';
-import prism from 'prism-media';
+import OpusScript from 'opusscript';
+
+const SAMPLE_RATE = 48000;
+const CHANNELS = 1;
+const FRAME_SIZE = 960;
 
 export class OpusDecoder extends Transform {
   constructor() {
     super();
-    this.decoder = new prism.opus.Decoder({
-      frameSize: 960,
-      channels: 1,
-      rate: 48000,
-    });
-    
-    this.decoder.on('data', (chunk) => {
-      this.push(chunk);
-    });
-    
-    this.decoder.on('error', (err) => {
-      // Ignore decode errors (corrupted frames happen)
-      console.debug('Opus decode error:', err.message);
-    });
+    this.opus = new OpusScript(SAMPLE_RATE, CHANNELS, OpusScript.Application.AUDIO);
   }
-  
+
   _transform(chunk, encoding, callback) {
     try {
-      this.decoder.write(chunk);
-    } catch (err) {
-      // Swallow decode errors
+      const decoded = this.opus.decode(chunk);
+      this.push(Buffer.from(decoded.buffer, decoded.byteOffset, decoded.byteLength));
+    } catch {
+      // Swallow decode errors (corrupted frames happen)
     }
     callback();
   }
-  
+
   _flush(callback) {
-    try { this.decoder.end(); } catch {}
     callback();
   }
-  
+
   _destroy(err, callback) {
-    // Clean up native libopus resources even if stream is destroyed without flush
-    try { this.decoder.destroy(); } catch {}
+    try { this.opus.delete(); } catch {}
     callback(err);
   }
 }

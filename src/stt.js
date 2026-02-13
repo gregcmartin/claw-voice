@@ -1,28 +1,32 @@
 /**
  * Speech-to-Text Module
- * 
- * Supports multiple STT providers:
- * - Deepgram (streaming, real-time, faster)
- * - OpenAI Whisper (batch, high accuracy)
+ *
+ * Primary: Local Lightning Whisper MLX server (~200ms on Apple Silicon)
+ * Fallback: Deepgram API, then OpenAI Whisper API
  */
 
 import OpenAI from 'openai';
 import { createClient } from '@deepgram/sdk';
-import { createReadStream } from 'fs';
+import { createReadStream, readFileSync } from 'fs';
 import 'dotenv/config';
 
-const STT_PROVIDER = process.env.STT_PROVIDER || 'deepgram'; // 'deepgram' or 'whisper'
+const STT_PROVIDER = process.env.STT_PROVIDER || 'mlx'; // 'mlx', 'deepgram', or 'whisper'
+const MLX_WHISPER_URL = process.env.MLX_WHISPER_URL || 'http://127.0.0.1:8787';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let openai;
+function getOpenAI() {
+  if (!openai) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openai;
+}
 
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+// Only create Deepgram client if configured
+let deepgram;
+if (process.env.DEEPGRAM_API_KEY) {
+  deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+}
 
 /**
  * Post-process transcript to correct domain-specific vocabulary
- * @param {string} text - Raw transcript text
- * @returns {string} Corrected transcript
  */
 function postProcessTranscript(text) {
   let processed = text;
@@ -34,7 +38,6 @@ function postProcessTranscript(text) {
   processed = processed.replace(/\bpound general\b/gi, '#general');
   processed = processed.replace(/\bhashtag general\b/gi, '#general');
   processed = processed.replace(/\bpound (\w+)/gi, '#$1');
-  // Company-specific terms can be configured via env vars if needed
   processed = processed.replace(/\bhai ?ve ?mind\b/gi, 'haivemind');
   processed = processed.replace(/\bhive mind\b/gi, 'haivemind');
   processed = processed.replace(/\bclawd ?bot\b/gi, 'Clawdbot');
@@ -47,7 +50,7 @@ function postProcessTranscript(text) {
   processed = processed.replace(/\bgit ?hub\b/gi, 'GitHub');
 
   // Name corrections
-  processed = processed.replace(/\btravis\b/gi, 'Jarvis');
+  processed = processed.replace(/\btravis\b/gi, 'Mandy');
 
   return processed;
 }
@@ -59,74 +62,85 @@ function postProcessTranscript(text) {
  */
 export async function transcribeAudio(wavPath) {
   let transcript;
-  
-  if (STT_PROVIDER === 'deepgram') {
+
+  // Try primary provider, then cascade through fallbacks
+  const providers = STT_PROVIDER === 'mlx'
+    ? [transcribeWithMLX, transcribeWithDeepgram, transcribeWithWhisper]
+    : STT_PROVIDER === 'deepgram'
+      ? [transcribeWithDeepgram, transcribeWithMLX, transcribeWithWhisper]
+      : [transcribeWithWhisper];
+
+  for (const provider of providers) {
     try {
-      transcript = await transcribeWithDeepgram(wavPath);
+      transcript = await provider(wavPath);
+      break; // Success
     } catch (err) {
-      console.warn('⚠️  Deepgram failed, falling back to Whisper:', err.message);
-      transcript = await transcribeWithWhisper(wavPath);
+      console.warn(`⚠️  ${provider.name} failed: ${err.message}`);
     }
-  } else {
-    transcript = await transcribeWithWhisper(wavPath);
   }
 
-  // Apply post-processing corrections
+  if (!transcript) return '';
   return postProcessTranscript(transcript);
 }
 
 /**
- * Transcribe with Deepgram (faster, streaming-capable)
+ * Transcribe with local Lightning Whisper MLX server (~200ms)
  */
-async function transcribeWithDeepgram(wavPath) {
-  try {
-    const audioStream = createReadStream(wavPath);
-    
-    const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
-      audioStream,
-      {
-        model: 'nova-2',
-        language: 'en',
-        smart_format: true,
-        punctuate: true,
-        diarize: false,
-        keywords: ['Jarvis'],
-      }
-    );
+async function transcribeWithMLX(wavPath) {
+  const audioBuffer = readFileSync(wavPath);
 
-    if (error) {
-      throw error;
-    }
+  const res = await fetch(`${MLX_WHISPER_URL}/transcribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'audio/wav' },
+    body: audioBuffer,
+    signal: AbortSignal.timeout(5000),
+  });
 
-    const transcript = result.results?.channels?.[0]?.alternatives?.[0]?.transcript;
-    
-    if (!transcript) {
-      throw new Error('No transcript returned from Deepgram');
-    }
-
-    return transcript.trim();
-  } catch (err) {
-    console.error('Deepgram STT Error:', err.message);
-    throw err;
+  if (!res.ok) {
+    throw new Error(`MLX server ${res.status}: ${await res.text()}`);
   }
+
+  const data = await res.json();
+  return (data.text || '').trim();
 }
 
 /**
- * Transcribe with OpenAI Whisper (fallback)
+ * Transcribe with Deepgram API
+ */
+async function transcribeWithDeepgram(wavPath) {
+  if (!deepgram) throw new Error('Deepgram not configured');
+
+  const audioBuffer = readFileSync(wavPath);
+  const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
+    audioBuffer,
+    {
+      model: 'nova-2',
+      language: 'en',
+      smart_format: true,
+      punctuate: true,
+      diarize: false,
+      keywords: ['Mandy'],
+      mimetype: 'audio/wav',
+    }
+  );
+
+  if (error) throw error;
+
+  const transcript = result.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+  return transcript.trim();
+}
+
+/**
+ * Transcribe with OpenAI Whisper API
  */
 async function transcribeWithWhisper(wavPath) {
-  try {
-    const response = await openai.audio.transcriptions.create({
-      file: createReadStream(wavPath),
-      model: 'whisper-1',
-      language: 'en',
-      response_format: 'text',
-      prompt: 'Jarvis, voice assistant',
-    });
-    
-    return response.trim();
-  } catch (err) {
-    console.error('Whisper STT Error:', err.message);
-    throw err;
-  }
+  const response = await getOpenAI().audio.transcriptions.create({
+    file: createReadStream(wavPath),
+    model: 'whisper-1',
+    language: 'en',
+    response_format: 'text',
+    prompt: 'Mandy, voice assistant',
+  });
+
+  return response.trim();
 }
